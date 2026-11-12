@@ -1,0 +1,19 @@
+# Roo Code & Multi-Agent Execution Rules: dfiles
+
+## Core Directives
+1. **Architecture Compliance**:
+   - Strictly follow namespace `dfiles` and interfaces in `.planning/ARCHITECTURE.md`.
+   - Never introduce direct coupling between `PaneView`, `TerminalDrawer`, and `InspectorSidebar`.
+   - Always route cross-component communication through signals / std::function callbacks.
+
+2. **C++20 & GObject Best Practices**:
+   - UI thread safety: All GTK4 / Libadwaita widget calls MUST occur on the GTK main loop.
+   - Worker threads / asynchronous tasks must report back via `g_idle_add`, `GAsyncReadyCallback`, or `GTask`.
+   - Resource management: Use RAII, `g_autoptr`, and smart pointers. Never leak `GObject` references or file descriptors.
+   - Handle all `GError**` appropriately; never ignore error pointers.
+
+3. **Multi-Agent Workflow & Synergy**:
+   - **Roo Code & GSD**: Execute tasks systematically from `PRD.md` and `.planning/ROADMAP.md`. Focus on one discrete task per turn.
+   - **Ralph Loop**: Log progress, findings, and verification checkpoints to `progress.txt` upon completing each task.
+   - **CodeRabbit Gate**: Ensure code adheres to `.coderabbit.yaml` (zero memory leaks, thread safety, rigorous error handling).
+   - **Verification**: Run `meson compile -C build` to verify every change before marking items complete (`- [x]`) in `PRD.md`.

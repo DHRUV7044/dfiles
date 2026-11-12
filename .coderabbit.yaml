@@ -1,0 +1,18 @@
+# CodeRabbit Configuration for dfiles (C++20 / GTK4 / Libadwaita / VTE)
+language: "en-US"
+reviews:
+  profile: "assertive"
+  auto_review:
+    enabled: true
+  path_instructions:
+    - path: "src/**/*.{cpp,hpp}"
+      instructions: >-
+        Perform assertive C++20 and GTK4 quality gate checks:
+        1. Memory & Resource Safety: Ensure GObject reference counts (g_object_ref/unref, g_autoptr) are balanced with no leaks. Check file descriptors and VTE PTY handles.
+        2. Concurrency & Thread Safety: Verify that NO GTK/Libadwaita UI manipulation happens outside the main GLib loop (must use g_idle_add or GTask).
+        3. Error Handling: Ensure GError pointers are checked and freed with g_error_free/g_clear_error.
+        4. Architecture: Verify adherence to namespace dfiles and contracts in .planning/ARCHITECTURE.md. Flag any circular dependencies.
+        5. Code Cleanliness: Modern C++20 idioms, const-correctness, no uninitialized variables, no raw pointer leaks.
+    - path: "meson.build"
+      instructions: >-
+        Verify build script correctness: check compiler flags (-Wall -Wextra), dependency versions (gtk4 >= 4.12, libadwaita-1 >= 1.4, vte-2.91-gtk4), and clean target separation.

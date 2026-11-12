@@ -1,0 +1,32 @@
+# Meson & Ninja build artifacts
+build/
+builddir/
+subprojects/*
+!subprojects/*.wrap
+.ninja_log
+.ninja_deps
+compile_commands.json
+
+# C/C++ binaries & objects
+*.o
+*.a
+*.so
+*.dylib
+dfiles
+
+# GSettings
+gschemas.compiled
+
+# Editor & IDE artifacts
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.directory
+
+# Council & transient logs
+.council/
+*.log
+*.tmp
+.DS_Store
