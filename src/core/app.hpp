@@ -100,6 +100,7 @@ private:
     gulong m_startupId{0};
     gulong m_activateId{0};
     gulong m_openId{0};
+    guint m_testQuitIdleId{0};
 };
 
 } // namespace dfiles::core

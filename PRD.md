@@ -126,10 +126,10 @@ dfiles/
 - [x] Task 1.4: Implement modern Places Sidebar with XDG locations, root, trash, and drive monitor.
 
 ### Milestone 2: File Browser & Dual-Pane Engine (`F3`)
-- [ ] Task 2.1: Implement `FileItem` model wrapping `GFileInfo` with sorting, icons, and metadata.
-- [ ] Task 2.2: Implement `FileView` supporting List View (`GtkColumnView`) and Grid View (`GtkGridView`).
-- [ ] Task 2.3: Build `PaneView` with navigation history (Back/Forward), selection, and folder scanning.
-- [ ] Task 2.4: Build `SplitView` (`F3`): side-by-side twin panes with active pane focus tracking and sync.
+- [x] Task 2.1: Implement `FileItem` model wrapping `GFileInfo` with sorting, icons, and metadata.
+- [x] Task 2.2: Implement `FileView` supporting List View (`GtkColumnView`) and Grid View (`GtkGridView`).
+- [x] Task 2.3: Build `PaneView` with navigation history (Back/Forward), selection, and folder scanning.
+- [x] Task 2.4: Build `SplitView` (`F3`): side-by-side twin panes with active pane focus tracking and sync.
 - [ ] Task 2.5: Build `PathBar` with clickable breadcrumb pills and `Ctrl+L` direct edit switcher.
 - [ ] Task 2.6: Implement inline instant Filter Bar (`Ctrl+I`).
 

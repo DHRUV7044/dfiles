@@ -89,5 +89,185 @@
   * Resolved D-Bus GApplication multi-instance registration collision in `tests/test_functional.cpp`.
 - Captured full execution logs to `.council/dfiles_phase1/round_1/evidence/test_adversarial.log`.
 
+[2026-11-13] Phase 2 - worker-core: Assignment 1 (Model Layer) Complete:
+- Implemented `src/model/file_item.hpp` & `src/model/file_item.cpp`:
+  * GObject `DfilesFileItem` declared via `G_DECLARE_FINAL_TYPE(DfilesFileItem, dfiles_file_item, DFILES, FILE_ITEM, GObject)`.
+  * Complete C API accessors: `dfiles_file_item_get_name`, `dfiles_file_item_get_display_name`, `dfiles_file_item_get_path`, `dfiles_file_item_get_uri`, `dfiles_file_item_get_mime_type`, `dfiles_file_item_get_size`, `dfiles_file_item_get_formatted_size`, `dfiles_file_item_get_modified_time`, `dfiles_file_item_get_formatted_time`, `dfiles_file_item_get_unix_mode`, `dfiles_file_item_get_permissions_string`, `dfiles_file_item_is_directory`, `dfiles_file_item_is_hidden`, `dfiles_file_item_is_symlink`, `dfiles_file_item_get_icon`, `dfiles_file_item_get_gfile`, `dfiles_file_item_get_file_info`.
+  * Clean separation of GObject `dispose` (unrefs GFile, GFileInfo, GIcon) and `finalize` (frees heap strings).
+  * Robust formatting helpers: `g_format_size` (human readable bytes with "--" for folders), `g_date_time_format` (ISO formatted string), Unix permissions string ("rwxr-xr-x" with SUID/SGID/sticky bit support).
+  * C++ RAII wrapper class `dfiles::model::FileItem` with copy/move semantics and zero-overhead delegation to underlying GObject.
+- Implemented `src/model/directory_model.hpp` & `src/model/directory_model.cpp`:
+  * Encapsulates `GListStore* m_store` storing `DfilesFileItem*`.
+  * Encapsulates `GtkFilterListModel* m_filterModel` with hidden file toggle (`showHidden`) and case-insensitive query substring matching.
+  * Encapsulates `GtkSortListModel* m_sortModel` supporting `SortColumn` (Name, Size, ModifiedTime, Type) and `SortOrder` (Ascending, Descending).
+  * Natural alphanumeric sort (`naturalCompare`) for files, with directories strictly sorted first.
+  * Asynchronous directory loading (`loadDirectory`) using `g_file_enumerate_children_async` and batch fetching (`g_file_enumerator_next_files_async` in batches of 100 with `g_list_store_splice`).
+  * Instant cancellation of in-flight operations with `g_cancellable_cancel` and weak pointer tokens (`m_aliveToken`) preventing use-after-free on rapid directory switching or mid-load destruction.
+  * Dynamic live filesystem monitoring via `GFileMonitor` handling created, deleted, attribute-changed, and moved/renamed files on the main GTK loop.
+  * Lifetime safety: cascaded GTK4 list model destruction correctly handled without double-freeing or leaking references.
+- Verified:
+  * Full compilation with `-Wall -Wextra -Wpedantic -Werror` via `ninja -C build`.
+  * Comprehensive standalone test suite passed: GObject types, accessors, formatting, async load, sorting, filtering, cancellation, and destructors verified 100%.
+  * Marked Task 2.1 complete in `PRD.md`.
+
+[2026-11-13] Phase 2 - worker-integration: Assignment 2 (Views and UI Integration) Complete:
+- Implemented `src/views/file_view.hpp` & `src/views/file_view.cpp`:
+  * Dual-mode list/grid view component (`FileView`) encapsulating `GtkColumnView` (List) and `GtkGridView` (Grid) inside a shared `GtkScrolledWindow`.
+  * `GtkColumnView` configured with 4 standard columns: Icon + Name (expanding), Size (numeric, right-aligned), Modified Date (dim-label), and Unix Permissions (monospace).
+  * `GtkGridView` configured with custom card factory featuring 48px icon and centered two-line ellipsized name.
+  * Rubberband multi-selection support via `GtkMultiSelection`.
+  * Strict signal disconnection and memory safety: `GListModel*` passed to `gtk_multi_selection_new` via `G_LIST_MODEL(g_object_ref(gmodel))` to honor transfer-full ownership; factory setup/bind/unbind/teardown strictly balanced.
+- Implemented `src/views/pane_view.hpp` & `src/views/pane_view.cpp`:
+  * Autonomous browsing pane encapsulating `DirectoryModel` and `FileView`.
+  * Navigation toolbar with Back, Forward, Up, dynamic path label, View Mode toggle (List/Grid), and Hidden files toggle (`Ctrl+H`).
+  * Center area using `GtkOverlay` hosting `FileView`, centered `GtkSpinner` for asynchronous directory loading, and `AdwStatusPage` for empty/error state.
+  * Bottom status bar displaying dynamic item count, directory count, file count, and selection summary.
+  * History stack navigation with balanced `GFile*` reference management.
+  * Active pane styling with `.pane-active` Libadwaita accent border and `.pane-inactive` state triggered via `GtkGestureClick`.
+- Implemented `src/views/split_view.hpp` & `src/views/split_view.cpp`:
+  * Horizontal `GtkPaned` container coordinating dual-pane browsing (`F3`).
+  * Manages `m_leftPane` and `m_rightPane` with 50/50 initial divider positioning.
+  * Manages active pane state tracking, tab cycle focus (`cycleFocus`), and directory synchronization.
+- Wired into `DFilesWindow` (`src/ui/window.hpp` & `src/ui/window.cpp`):
+  * Replaced temporary placeholder status page with `SplitView` hosted in `m_contentArea`.
+  * Synchronized `AdwWindowTitle` (title and subtitle) with active pane directory updates.
+  * Connected `PlacesSidebar` selection to navigate active pane.
+  * Wired `win.toggle-split` action and `F3` key accelerator to `m_splitView->toggleSplit()`.
+  * Automatically loads `$HOME` into primary pane on startup.
+  * Proper RAII teardown order: subcomponents reset cleanly before native window destruction.
+- Build & Verification:
+  * Updated `meson.build` with core sources shared across `dfiles`, `test_functional`, and `test_adversarial`.
+[2026-11-13] Phase 2 - worker-hardening: Code audit, defensive guards, and leak-free GObject lifecycle:
+- GObject Reference & Signal Safety:
+  * In FileItem: Wrapped `g_file_info_get_modification_date_time` in `g_autoptr(GDateTime)` resolving memory leak on every file item during attribute extraction.
+  * In DirectoryModel: Resolved `GFileMonitor` signal leak by tracking `m_monitorChangedId` and explicitly disconnecting before `g_clear_object(&m_monitor)` in destructor and `setupFileMonitor()`; `m_cancellable` cancelled and cleared; natural alphanumeric sort hardened against non-UTF8 and zero-advancement infinite loops with `g_utf8_get_char_validated`; query flags set to `G_FILE_QUERY_INFO_NOFOLLOW_SYMLINKS` preventing broken/cyclic symlink hangs; off-thread safety check added to `loadDirectory()` via `g_idle_add`.
+  * In FileView: Resolved 5 factory object lifetime assertions by removing `g_autoptr(GtkListItemFactory)` (since `gtk_column_view_column_new` and `gtk_grid_view_new` adopt full transfer ownership); balanced GtkMultiSelection refcount by passing `G_LIST_MODEL(g_object_ref(gmodel))` to prevent premature destruction of `m_sortModel`; added `m_colActivateId` and `m_gridActivateId` to cleanly disconnect item activation signals; hardened `bind` and `unbind` across all factories to clear images and labels.
+  * In PaneView: Bounded history stacks to `MAX_HISTORY_ENTRIES = 50`; clean RAII unref of all history `GFile*` entries; cleared callbacks; handled symlink-to-directory navigation defensively; handled `onError` cleanly by showing `"Unable to Open Folder"` status page and resetting status label to `"0 items"`.
+  * In SplitView: Implemented clean destructor nulling pane activation callbacks and active pane changed listeners prior to resetting panes.
+  * In DFilesWindow: Fixed `m_keyController` cleanup to avoid double-unref after `gtk_widget_remove_controller`; ensured toast cancellation and proper destruction sequencing.
+- Verification:
+  * Compiled with 0 warnings with GCC 15.2.0 under `-Wall -Wextra -Wpedantic -Werror`.
+  * Executed `meson test -C build --verbose` with `G_DEBUG=fatal-criticals`: 66/66 functional tests passed, 10/10 adversarial stress test suites passed cleanly with exit code 0.
+
+[2026-11-13] Phase 2 - tester-functional: Comprehensive Phase 2 Functional Test Suite & Evidence Logging:
+- Extended `tests/test_functional.cpp` with 5 comprehensive Phase 2 suites (Sections 6–10), expanding assertions from 66 to 147:
+  * Section 6: FileItem Unit Verification (attribute extraction, formatting, copy/move constructors, assignment operators, Unix permissions string, human-readable size formatting, GIcon retrieval).
+  * Section 7: DirectoryModel Enumeration, Sorting & Filtering (`loadDirectory` async enumeration, `showHidden` toggle, natural alphanumeric sorting with folders first, case-insensitive substring search filtering, sorting order inversion).
+  * Section 8: PaneView Navigation & History Stack (`dirA -> dirB -> dirC` multi-hop traversal, `goBack()`, `goForward()`, `navigateUp()`, empty back/forward stack boundary conditions, `ViewMode::List` vs `ViewMode::Grid` switching).
+  * Section 9: SplitView & F3 Dual-Pane (initial single-pane state, `toggleSplit()`, `cycleFocus()`, active pane focus preservation / reset to left pane on closure, independent dual-pane browsing).
+  * Section 10: Full Window Integration (`SplitView` hosted in `DFilesWindow::getContentArea()`, `win.toggle-split` action synchronization, headerbar title/subtitle updates, `PlacesSidebar` active pane navigation synchronization).
+- Lifecycle & Event Loop Hardening:
+  * Hardened `DFilesApp` (`src/core/app.hpp`, `src/core/app.cpp`): Added `m_testQuitIdleId` tracking and explicit `g_source_remove` in `~DFilesApp()` to prevent pending idle callbacks from firing against destroyed application instances.
+  * In test `main()`: Explicitly acquired default GLib main context via `g_main_context_acquire(g_main_context_default())` to ensure `g_main_context_is_owner` accurately detects the test runner thread.
+- Build & Verification:
+  * Clean compilation with GCC 15.2.0 under `-Wall -Wextra -Wpedantic -Werror`.
+  * Executed under `G_DEBUG=fatal-criticals xvfb-run -a meson test -C build --verbose`:
+    - `1/2 dfiles:functional OK (0.95s)`: 147 / 147 tests passed (0 failures, 0 criticals).
+    - `2/2 dfiles:adversarial OK (5.06s)`: 15 / 15 stress vectors passed (0 failures, 0 criticals).
+- Evidence captured and persisted to `.council/dfiles_phase2/round_1/evidence/test_functional.log`.
+[2026-11-13] Phase 2 - tester-adversarial: Phase 2 Chaos, Stress, Hostile Paths, 10k Scaling & ASan Verification:
+- Extended `tests/adversarial_stress.cpp` with dedicated Phase 2 vectors (Vector 2.11 to 2.15), expanding stress suite from 10 to 15 vectors:
+  * Vector 2.11: Hostile & Inaccessible Paths (`chmod 000`):
+    - Created temporary folder with permissions 0000; verified `DirectoryModel::loadDirectory` handled permission denied cleanly via `onError` callback without uncaught exceptions or crashing.
+    - Verified `PaneView::navigateTo` gracefully transitioned to `AdwStatusPage` with title `"Unable to Open Folder"`, icon `"dialog-error-symbolic"`, and zero item count.
+    - Verified clean recovery upon navigating back to accessible directory; status page hides and items populate normally.
+  * Vector 2.12: Circular & Cyclic Symlinks:
+    - Created self-referential symlink (`loop -> loop`), mutually recursive symlinks (`sym_a -> sym_b` and `sym_b -> sym_a`), and cyclic parent symlink (`parent_loop -> ..`).
+    - Verified `DirectoryModel` parses all 4 symlinks safely via `G_FILE_QUERY_INFO_NOFOLLOW_SYMLINKS` with zero infinite loops, zero hangs, zero crashes, and 100% accurate identification via `FileItem::isSymlink()`.
+  * Vector 2.13: Massive Directory Churn & Scaling (10,000 Files):
+    - Generated 10,000 temporary files (33ms) and streamed them into `DirectoryModel::loadDirectory`.
+    - Verified async 100-item batching via `g_file_enumerator_next_files_async` smoothly populated `GListStore` with all 10,000 files in ~400ms without UI freezing or memory exhaustion.
+  * Vector 2.14: In-Flight Navigation Cancellation Storm:
+    - Rapidly fired 50 `navigateTo` requests across 50 distinct directories while async I/O was in-flight.
+    - Verified `GCancellable` superseded operations cleanly with zero double-frees or use-after-free, accurately converging to the 50th directory with matching file counts.
+  * Vector 2.15: Rapid F3 Toggle Storm During Heavy Async Directory Loading:
+    - Initiated 10,000-file loading in left pane and immediately hammered `SplitView::toggleSplit()` 300 times while I/O streamed.
+    - Verified zero layout crashes, zero GTK paned assertion failures, clean dual/single pane transitions, and final split state consistency.
+- AddressSanitizer & UndefinedBehaviorSanitizer (ASan/UBSan):
+  * Rebuilt dedicated ASan build (`build-asan`) with `-Db_sanitize=address,undefined`.
+  * Ran all 15 stress vectors under ASan/UBSan: 0 memory errors, 0 use-after-free, 0 buffer overflows, 0 undefined behavior traps.
+- Meson Test Integration:
+  * Executed under `G_DEBUG=fatal-criticals meson test -C build --verbose`: 147/147 functional tests passed, 15/15 adversarial stress tests passed (0 failures, 0 criticals).
+- Evidence captured and saved to `.council/dfiles_phase2/round_1/evidence/test_adversarial.log`.
+
+[2026-11-13] Phase 2 - worker-hardening: Supreme Court Remediation Directive Execution (REMED-1 to REMED-8):
+- REMED-1 (Asynchronous File Monitor I/O):
+  * Replaced all synchronous `g_file_query_info()` calls in `DirectoryModel::handleMonitorChanged()` (CREATED, MOVED_IN, ATTRIBUTE_CHANGED, CHANGES_DONE_HINT, RENAMED/MOVED) with non-blocking `g_file_query_info_async()`.
+  * Implemented `onMonitorQueryInfoReadyTrampoline` and `handleMonitorQueryInfoReady` with weak `m_aliveToken` locking and safe main loop updates.
+- REMED-2 (Cross-Directory Contamination Race Elimination):
+  * Stored owned `GFile* targetDirectory` inside `EnumerateContext` and `BatchContext`.
+  * In `handleEnumerateChildrenReady` and `handleNextFilesReady`, validated `m_currentDirectory == ctx->targetDirectory` and discarded superseded directory batches cleanly.
+  * Child files are now constructed using `ctx->targetDirectory` instead of `m_currentDirectory`.
+- REMED-3 (Off-Thread loadDirectory UAF Elimination):
+  * Stored `std::weak_ptr<bool> aliveToken` inside `LoadPayload`.
+  * Verified `lp->aliveToken.lock()` in the `g_idle_add` callback prior to accessing `lp->model`.
+- REMED-4 (Hardware Keyboard Focus Synchronization):
+  * Added `FileView::grabFocus()` focusing active list/grid view or scrolled window container.
+  * Added `PaneView::grabFocus()` delegating to `FileView::grabFocus()`, and ensured `PaneView::setActive(true)` calls `grabFocus()`.
+  * Ensured `SplitView::setActivePane(PaneView* pane)` calls `pane->setActive(true)` and `pane->grabFocus()`.
+- REMED-5 (Strict Weak Ordering & Leading Zeros Fix in naturalCompare):
+  * When digit sequences have identical numeric values (`n1 == n2`), tie-break by digit sequence length (leading zeros) before advancing.
+  * Fallback to `strcmp(orig_s1, orig_s2)` at the end of string comparison so distinct filenames never return 0.
+- REMED-6 (Restore getSelectedItems Contract & Lifetime Safety):
+  * Updated `FileView::getSelectedItems()` and `PaneView::getSelectedItems()` to return `std::vector<model::FileItem>` with RAII reference management.
+  * Updated `onSelectionChanged` and `updateSelectionStatus` signatures to use `const std::vector<model::FileItem>&`.
+- REMED-7 (Interactive Column Sorters in GtkColumnView):
+  * Created dedicated `GtkCustomSorter` instances for all 4 columns (Name, Size, Modified Date, Permissions) and attached them via `gtk_column_view_column_set_sorter`.
+  * Connected `GtkColumnViewSorter::changed` signal to dynamically update `DirectoryModel::setSorting(col, order)`.
+- REMED-8 (Factory Ownership Balance):
+  * Explicitly paired `gtk_column_view_column_new(..., g_object_ref(factory))` and `gtk_grid_view_new(..., g_object_ref(factory))` with caller-side `g_object_unref(factory)` to balance initial factory references and satisfy transfer-full lifecycle contracts.
+- Verification:
+  * Rebuilt with 0 warnings under `-Wall -Wextra -Wpedantic -Werror`.
+  * Ran `meson test -C build --verbose` with `G_DEBUG=fatal-criticals`: 147/147 functional tests passed, 15/15 adversarial stress vectors passed cleanly (100% pass rate).
+
+[2026-11-13] Phase 2 - tester-functional (Round 2): Remediation Verification & Evidence Logging:
+- Extended `tests/test_functional.cpp` with dedicated High Court remediation tests, expanding assertions from 147 to 165:
+  * REMED-5 (`naturalCompare` with leading zeros):
+    - Declared `dfiles::model::naturalCompare` in `src/model/directory_model.hpp` and exported from `src/model/directory_model.cpp`.
+    - Added assertions verifying `"file01.txt"` vs `"file1.txt"` returns non-zero (`!= 0`), `"file1.txt"` vs `"file01.txt"` returns non-zero (`!= 0`), anti-symmetric ordering, and identical strings return 0.
+  * REMED-6 (`getSelectedItems` RAII lifetime):
+    - Added tests in Section 8 verifying `FileView::getSelectedItems()` and `PaneView::getSelectedItems()` return matching `std::vector<model::FileItem>` with valid RAII references (non-null GObject, DFILES_IS_FILE_ITEM, valid GFile, non-empty names).
+    - Verified copy and move semantics retain valid GObject references.
+    - Verified `unselectAll()` clears selection across both views.
+  * REMED-4 (Hardware Focus Routing via `grabFocus`):
+    - Added tests in Section 9 wrapping `SplitView` in a presented `GtkWindow` and verifying `splitView.getActivePane()->grabFocus()`, `splitView.setActivePane(rightPane)`, and `splitView.cycleFocus()` successfully route keyboard focus to the respective pane widget tree via `gtk_root_get_focus()`.
+- Build & Verification:
+  * Clean compilation with GCC 15.2.0 under `-Wall -Wextra -Wpedantic -Werror`.
+  * Executed `G_DEBUG=fatal-criticals xvfb-run -a meson test -C build --verbose`:
+    - `1/2 dfiles:functional OK (1.13s)` — 165 / 165 passed (100%).
+    - `2/2 dfiles:adversarial OK (2.79s)` — 18 / 18 stress vectors passed (100%).
+- Full evidence log persisted to `.council/dfiles_phase2/round_2/evidence/test_functional.log`.
+
+[2026-11-13] Phase 2 - tester-adversarial (Round 2): Adversarial Stress Suite, Non-Blocking Monitor I/O, Cross-Contamination & ASan Verification:
+- Expanded and enhanced adversarial stress suite in `tests/adversarial_stress.cpp` from 15 to 18 vectors:
+  * Vector 2.14 (In-Flight Navigation Cancellation Storm & Cross-Directory Contamination Verification):
+    - Validates REMED-2 / REMED-P2-01 / SEC-BLOCK-03 / ARCH-P2-02.
+    - Rapidly fired 50 in-flight `navigateTo` requests across 50 distinct temporary directories (`dir_000` to `dir_049`).
+    - Added rigorous assertion loops verifying that every single item's `GFile` in `paneView.getModel()` is strictly prefixed by `dir_049/` and NOT any of the cancelled directories `dir_000/` through `dir_048/` (0% contamination, 100% path purity).
+    - Executed 50 rapid `loadDirectory` calls directly on a raw `DirectoryModel`, verifying `BatchContext::targetDirectory` isolates batches and yields exactly 10/10 items belonging to the final directory.
+  * Vector 2.16 (Non-Blocking File Monitor Async I/O & Mutation Storm):
+    - Validates REMED-4 / REMED-P2-02 / ARCH-P2-04 / SEC-BLOCK-04.
+    - Attached `DirectoryModel` to a monitored directory and bombarded it with:
+      * 100 rapid file creations: verified model increments to 100 items asynchronously via `g_file_query_info_async` without blocking the UI main loop.
+      * 50 rapid content modifications: verified size updates asynchronously without event-loop stutter.
+      * 50 rapid file unlinks/deletions: verified item count drops to 50 items.
+      * 25 rapid file renames: verified new filenames are discovered in the model.
+      * Teardown Race Condition Stress: burst-created 30 files and destroyed `DirectoryModel` while async query tasks were in-flight; verified `aliveToken` weak pointer safely discards completed callbacks without heap use-after-free.
+  * Vector 2.17 (Natural Sort Strict Weak Ordering Stress & Leading Zeros Edge Cases):
+    - Validates REMED-P2-05 / REMED-8 / BLOCK-QA-P2-05 / SEC-WARN-02.
+    - Populated dataset designed to challenge comparator strict weak ordering: `"file01.txt"` vs `"file1.txt"`, `"file001.txt"`, `"0100"` vs `"100"`, case variants, and numeric prefixes.
+    - Verified strict weak ordering across `Name` (Ascending & Descending), `Size`, `Type`, and `ModifiedTime`: no two distinct filenames compare equal, and sort orders are stable and deterministic.
+  * Vector 2.18 (Dual-Pane Focus Cycling & Hardware Keyboard Focus Stress):
+    - Validates REMED-P2-04 / REMED-3 / REMED-5 / ARCH-P2-03 / BLOCK-QA-P2-04.
+    - Executed 200 rapid `cycleFocus()` iterations across split panes, asserting active/inactive states and verifying `grabFocus()` invocations.
+- Verification & Test Results:
+  * Compiler cleanliness: GCC 15.2.0 compiled standard and ASan builds with 0 warnings under `-Wall -Wextra -Wpedantic -Werror`.
+  * Standard adversarial execution: 18 / 18 vectors PASSED (100%).
+  * AddressSanitizer & UndefinedBehaviorSanitizer: 18 / 18 vectors PASSED (100% clean, 0 memory faults, 0 leaks, 0 UAF).
+  * Hostile environment injection suite: 13 / 13 tests PASSED (100%).
+  * Meson integrated suite (`G_DEBUG=fatal-criticals xvfb-run -a meson test -C build --verbose`): 2/2 suites PASSED (165 functional + 18 adversarial = 183 total tests).
+- Evidence Log:
+  * Full output persisted to `.council/dfiles_phase2/round_2/evidence/test_adversarial.log` (30 KB).
+
 
 

@@ -9,6 +9,7 @@
 
 #include "ui/headerbar.hpp"
 #include "ui/sidebar.hpp"
+#include "views/split_view.hpp"
 
 namespace dfiles::ui {
 
@@ -36,12 +37,14 @@ public:
 
     [[nodiscard]] DFilesHeaderBar* getHeaderBar() const;
     [[nodiscard]] PlacesSidebar* getSidebar() const;
+    [[nodiscard]] views::SplitView* getSplitView() const noexcept;
     [[nodiscard]] GtkWidget* getContentArea() const;
 
 private:
     void setupUI(AdwApplication* app);
     void setupSignals();
     void setupActions();
+    void setupShortcuts();
 
     GtkWidget* m_window{nullptr};
     GtkWidget* m_toolbarView{nullptr};
@@ -51,11 +54,15 @@ private:
 
     std::unique_ptr<DFilesHeaderBar> m_headerBar;
     std::unique_ptr<PlacesSidebar> m_sidebar;
+    std::unique_ptr<views::SplitView> m_splitView;
 
     // REMED-1: Off-thread toast thread safety & pending source lifecycle tracking
     std::mutex m_toastMutex;
     std::vector<guint> m_pendingToastSources;
     bool m_isDestroyed{false};
+
+    GtkEventController* m_keyController{nullptr};
+    gulong m_keyPressedId{0};
 };
 
 } // namespace dfiles::ui

@@ -73,6 +73,10 @@ DFilesApp::~DFilesApp() {
             }
             m_openId = 0;
         }
+        if (m_testQuitIdleId > 0) {
+            g_source_remove(m_testQuitIdleId);
+            m_testQuitIdleId = 0;
+        }
         g_clear_object(&m_app);
     }
 }
@@ -123,9 +127,10 @@ void DFilesApp::onActivate() {
 
     if (m_testMode) {
         g_print("[test-mode] Application activated and DFilesWindow instantiated successfully.\n");
-        g_idle_add(+[](gpointer userData) -> gboolean {
+        m_testQuitIdleId = g_idle_add(+[](gpointer userData) -> gboolean {
             auto* self = static_cast<DFilesApp*>(userData);
             if (self) {
+                self->m_testQuitIdleId = 0;
                 self->onActionQuit();
             }
             return G_SOURCE_REMOVE;

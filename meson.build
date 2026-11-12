@@ -28,14 +28,21 @@ dfiles_deps = [
 # Include directories
 inc = include_directories('src')
 
-# Phase 1 Sources
-sources = [
-  'src/main.cpp',
+# Core library sources (shared between executable and test targets)
+core_sources = [
   'src/core/app.cpp',
+  'src/model/file_item.cpp',
+  'src/model/directory_model.cpp',
+  'src/views/file_view.cpp',
+  'src/views/pane_view.cpp',
+  'src/views/split_view.cpp',
   'src/ui/headerbar.cpp',
   'src/ui/sidebar.cpp',
   'src/ui/window.cpp',
 ]
+
+# Sources for main dfiles executable
+sources = ['src/main.cpp'] + core_sources
 
 # Executable target
 executable('dfiles',
@@ -48,11 +55,7 @@ executable('dfiles',
 # Phase 1 Functional Test Suite
 test_functional_sources = [
   'tests/test_functional.cpp',
-  'src/core/app.cpp',
-  'src/ui/headerbar.cpp',
-  'src/ui/sidebar.cpp',
-  'src/ui/window.cpp',
-]
+] + core_sources
 
 test_functional_bin = executable('test_functional',
   test_functional_sources,
@@ -61,17 +64,14 @@ test_functional_bin = executable('test_functional',
 )
 
 test('functional', test_functional_bin,
+  is_parallel: false,
   env: ['G_DEBUG=fatal-criticals']
 )
 
 # Phase 1 Adversarial Stress Test Suite
 test_adversarial_sources = [
   'tests/adversarial_stress.cpp',
-  'src/core/app.cpp',
-  'src/ui/headerbar.cpp',
-  'src/ui/sidebar.cpp',
-  'src/ui/window.cpp',
-]
+] + core_sources
 
 test_adversarial_bin = executable('test_adversarial',
   test_adversarial_sources,
@@ -80,6 +80,6 @@ test_adversarial_bin = executable('test_adversarial',
 )
 
 test('adversarial', test_adversarial_bin,
+  is_parallel: false,
   env: ['G_DEBUG=fatal-criticals']
 )
-

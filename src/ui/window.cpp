@@ -1,5 +1,6 @@
 #include "ui/window.hpp"
 #include <algorithm>
+#include <gdk/gdkkeysyms.h>
 
 namespace dfiles::ui {
 
@@ -7,6 +8,7 @@ DFilesWindow::DFilesWindow(AdwApplication* app) {
     setupUI(app);
     setupSignals();
     setupActions();
+    setupShortcuts();
 }
 
 DFilesWindow::~DFilesWindow() {
@@ -29,12 +31,38 @@ DFilesWindow::~DFilesWindow() {
     if (m_sidebar) {
         m_sidebar->onPlaceSelected = nullptr;
     }
+    if (m_splitView) {
+        m_splitView->onActivePaneChanged = nullptr;
+        if (m_splitView->getLeftPane()) {
+            m_splitView->getLeftPane()->onDirectoryChanged = nullptr;
+        }
+        if (m_splitView->getRightPane()) {
+            m_splitView->getRightPane()->onDirectoryChanged = nullptr;
+        }
+    }
 
-    // 3. Reset encapsulated sub-components
+    // 3. Disconnect and remove keyboard shortcut controller
+    if (m_keyController) {
+        if (m_keyPressedId > 0) {
+            if (g_signal_handler_is_connected(m_keyController, m_keyPressedId)) {
+                g_signal_handler_disconnect(m_keyController, m_keyPressedId);
+            }
+            m_keyPressedId = 0;
+        }
+        if (m_window) {
+            gtk_widget_remove_controller(m_window, m_keyController);
+        } else {
+            g_clear_object(&m_keyController);
+        }
+        m_keyController = nullptr;
+    }
+
+    // 4. Reset encapsulated sub-components while native widgets are still valid
+    m_splitView.reset();
     m_sidebar.reset();
     m_headerBar.reset();
 
-    // 4. Destroy native window cleanly if still allocated
+    // 5. Destroy native window cleanly if still allocated
     if (m_window) {
         g_object_remove_weak_pointer(G_OBJECT(m_window), reinterpret_cast<gpointer*>(&m_window));
         gtk_window_destroy(GTK_WINDOW(m_window));
@@ -128,6 +156,10 @@ PlacesSidebar* DFilesWindow::getSidebar() const {
     return m_sidebar.get();
 }
 
+views::SplitView* DFilesWindow::getSplitView() const noexcept {
+    return m_splitView.get();
+}
+
 GtkWidget* DFilesWindow::getContentArea() const {
     return m_contentArea;
 }
@@ -165,20 +197,14 @@ void DFilesWindow::setupUI(AdwApplication* app) {
     gtk_paned_set_resize_start_child(GTK_PANED(m_mainPaned), FALSE);
     gtk_paned_set_shrink_start_child(GTK_PANED(m_mainPaned), FALSE);
 
-    // Right pane: Content placeholder container for views and terminal
+    // Right pane: Content container hosting SplitView
     m_contentArea = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     gtk_widget_set_hexpand(m_contentArea, TRUE);
     gtk_widget_set_vexpand(m_contentArea, TRUE);
 
-    // Initial placeholder status page for Phase 1
-    GtkWidget* statusPage = adw_status_page_new();
-    adw_status_page_set_icon_name(ADW_STATUS_PAGE(statusPage), "system-file-manager-symbolic");
-    adw_status_page_set_title(ADW_STATUS_PAGE(statusPage), "dfiles");
-    adw_status_page_set_description(ADW_STATUS_PAGE(statusPage),
-        "Select a folder from the sidebar or press F3 for Split View, F4 for Terminal, F11 for Inspector.");
-    gtk_widget_set_hexpand(statusPage, TRUE);
-    gtk_widget_set_vexpand(statusPage, TRUE);
-    gtk_box_append(GTK_BOX(m_contentArea), statusPage);
+    // Phase 2: Host SplitView inside content area
+    m_splitView = std::make_unique<views::SplitView>();
+    gtk_box_append(GTK_BOX(m_contentArea), m_splitView->getWidget());
 
     gtk_paned_set_end_child(GTK_PANED(m_mainPaned), m_contentArea);
     gtk_paned_set_resize_end_child(GTK_PANED(m_mainPaned), TRUE);
@@ -187,14 +213,65 @@ void DFilesWindow::setupUI(AdwApplication* app) {
     // Pack into toast overlay & window
     adw_toast_overlay_set_child(ADW_TOAST_OVERLAY(m_toastOverlay), m_mainPaned);
     adw_application_window_set_content(ADW_APPLICATION_WINDOW(m_window), m_toolbarView);
+
+    // Initial navigation: Load $HOME into primary pane
+    const char* home = g_get_home_dir();
+    if (home) {
+        g_autoptr(GFile) homeDir = g_file_new_for_path(home);
+        m_splitView->getLeftPane()->navigateTo(homeDir);
+    }
 }
 
 void DFilesWindow::setupSignals() {
+    auto updateHeaderForPane = [this](views::PaneView* pane) {
+        if (!pane || !m_headerBar) {
+            return;
+        }
+        GFile* dir = pane->getCurrentDirectory();
+        if (dir) {
+            g_autofree char* path = g_file_get_parse_name(dir);
+            g_autofree char* basename = g_file_get_basename(dir);
+            m_headerBar->setTitle(basename ? basename : "dfiles", path ? path : "");
+
+            g_autofree char* uri = g_file_get_uri(dir);
+            if (uri && m_sidebar) {
+                m_sidebar->selectPlaceByUri(uri);
+            }
+        }
+    };
+
+    if (m_splitView) {
+        m_splitView->onActivePaneChanged = [this, updateHeaderForPane](views::PaneView* activePane) {
+            updateHeaderForPane(activePane);
+        };
+
+        if (m_splitView->getLeftPane()) {
+            m_splitView->getLeftPane()->onDirectoryChanged = [this, updateHeaderForPane](GFile*) {
+                if (m_splitView->getActivePane() == m_splitView->getLeftPane()) {
+                    updateHeaderForPane(m_splitView->getLeftPane());
+                }
+            };
+        }
+
+        if (m_splitView->getRightPane()) {
+            m_splitView->getRightPane()->onDirectoryChanged = [this, updateHeaderForPane](GFile*) {
+                if (m_splitView->getActivePane() == m_splitView->getRightPane()) {
+                    updateHeaderForPane(m_splitView->getRightPane());
+                }
+            };
+        }
+    }
+
     if (m_headerBar) {
         m_headerBar->onSplitToggled = [this]() {
-            if (m_headerBar) {
-                const bool active = m_headerBar->isSplitActive();
+            if (m_splitView) {
+                m_splitView->toggleSplit();
+                const bool active = m_splitView->isSplit();
+                if (m_headerBar && m_headerBar->isSplitActive() != active) {
+                    m_headerBar->setSplitActive(active);
+                }
                 showToast(active ? "Split View enabled (F3)" : "Split View disabled (F3)");
+
                 if (m_window) {
                     if (auto* act = g_action_map_lookup_action(G_ACTION_MAP(m_window), "toggle-split")) {
                         g_autoptr(GVariant) state = g_action_get_state(act);
@@ -239,9 +316,11 @@ void DFilesWindow::setupSignals() {
 
     if (m_sidebar) {
         m_sidebar->onPlaceSelected = [this](const std::string& uri) {
-            showToast("Navigating to: " + uri);
-            if (m_headerBar) {
-                m_headerBar->setTitle("dfiles", uri);
+            if (m_splitView && m_splitView->getActivePane()) {
+                g_autoptr(GFile) file = g_file_new_for_uri(uri.c_str());
+                if (file) {
+                    m_splitView->getActivePane()->navigateTo(file);
+                }
             }
         };
     }
@@ -272,12 +351,14 @@ void DFilesWindow::setupActions() {
         }
         const gboolean active = g_variant_get_boolean(value);
         g_simple_action_set_state(action, value);
+
+        if (self->m_splitView && self->m_splitView->isSplit() != static_cast<bool>(active)) {
+            self->m_splitView->toggleSplit();
+        }
+
         if (self->m_headerBar) {
             if (self->m_headerBar->isSplitActive() != static_cast<bool>(active)) {
                 self->m_headerBar->setSplitActive(active);
-            }
-            if (self->m_headerBar->onSplitToggled) {
-                self->m_headerBar->onSplitToggled();
             }
         }
     }), this);
@@ -360,6 +441,31 @@ void DFilesWindow::setupActions() {
         }
     }), this);
     g_action_map_add_action(actionMap, G_ACTION(focusFilterAction));
+}
+
+void DFilesWindow::setupShortcuts() {
+    if (!m_window) {
+        return;
+    }
+
+    m_keyController = gtk_event_controller_key_new();
+    m_keyPressedId = g_signal_connect(m_keyController, "key-pressed",
+        G_CALLBACK(+[](GtkEventControllerKey*, guint keyval, guint, GdkModifierType, gpointer data) -> gboolean {
+            auto* self = static_cast<DFilesWindow*>(data);
+            if (!self || !self->m_splitView) {
+                return GDK_EVENT_PROPAGATE;
+            }
+
+            if (keyval == GDK_KEY_Tab) {
+                if (self->m_splitView->isSplit()) {
+                    self->m_splitView->cycleFocus();
+                    return GDK_EVENT_STOP;
+                }
+            }
+            return GDK_EVENT_PROPAGATE;
+        }), this);
+
+    gtk_widget_add_controller(m_window, m_keyController);
 }
 
 } // namespace dfiles::ui

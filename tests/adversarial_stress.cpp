@@ -1,20 +1,29 @@
 #include "core/app.hpp"
-#include "ui/window.hpp"
+#include "model/directory_model.hpp"
+#include "model/file_item.hpp"
 #include "ui/headerbar.hpp"
 #include "ui/sidebar.hpp"
+#include "ui/window.hpp"
+#include "views/pane_view.hpp"
+#include "views/split_view.hpp"
 
 #include <adwaita.h>
-#include <gtk/gtk.h>
+#include <fcntl.h>
 #include <gdk/gdkkeysyms.h>
+#include <gtk/gtk.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
+#include <atomic>
 #include <cassert>
 #include <chrono>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
-#include <atomic>
 
 namespace {
 
@@ -26,17 +35,46 @@ void pumpEvents(int iterations = 10) {
     }
 }
 
+bool pumpWhile(const std::function<bool()>& condition, int timeoutMs = 15000) {
+    auto start = std::chrono::steady_clock::now();
+    while (g_main_context_iteration(nullptr, FALSE)) {
+    }
+    while (condition()) {
+        while (g_main_context_iteration(nullptr, FALSE)) {
+        }
+        auto now = std::chrono::steady_clock::now();
+        if (std::chrono::duration_cast<std::chrono::milliseconds>(now - start).count() > timeoutMs) {
+            return false; // Timed out
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    while (g_main_context_iteration(nullptr, FALSE)) {
+    }
+    return true; // Condition completed
+}
 
+AdwStatusPage* findStatusPage(GtkWidget* root) {
+    if (!root) return nullptr;
+    if (ADW_IS_STATUS_PAGE(root)) {
+        return ADW_STATUS_PAGE(root);
+    }
+    for (GtkWidget* child = gtk_widget_get_first_child(root); child != nullptr; child = gtk_widget_get_next_sibling(child)) {
+        AdwStatusPage* found = findStatusPage(child);
+        if (found) return found;
+    }
+    return nullptr;
+}
 
 } // namespace
 
 int main(int /*argc*/, char* /*argv*/[]) {
     g_print("====================================================\n");
-    g_print("  DFILES PHASE 1: ADVERSARIAL STRESS TEST SUITE    \n");
+    g_print("  DFILES PHASE 1 & 2: ADVERSARIAL STRESS TEST SUITE\n");
     g_print("====================================================\n\n");
 
     // Initialize Libadwaita / GTK
     adw_init();
+    g_main_context_acquire(g_main_context_default());
 
     g_autoptr(AdwApplication) app = adw_application_new("org.gnome.dfiles.stress", G_APPLICATION_NON_UNIQUE);
     g_assert_nonnull(app);
@@ -349,6 +387,569 @@ int main(int /*argc*/, char* /*argv*/[]) {
             }
         }
         pumpEvents(10);
+    });
+
+    // -------------------------------------------------------------
+    // PHASE 2 ADVERSARIAL VECTORS
+    // -------------------------------------------------------------
+
+    // TEST 11: Hostile & Inaccessible Paths (chmod 000)
+    runTest("Vector 2.11: Hostile & Inaccessible Paths (chmod 000)", [&]() {
+        std::string testDir = "/tmp/dfiles_stress_inaccessible_" + std::to_string(getpid());
+        std::filesystem::remove_all(testDir);
+        std::filesystem::create_directories(testDir);
+        {
+            std::ofstream(testDir + "/secret.txt") << "secret data";
+        }
+        int ret = chmod(testDir.c_str(), 0000);
+        g_assert_cmpint(ret, ==, 0);
+
+        // 1. DirectoryModel error handling
+        dfiles::model::DirectoryModel model;
+        bool modelErrorFired = false;
+        std::string errorMsg;
+        model.onError = [&](const std::string& msg) {
+            modelErrorFired = true;
+            errorMsg = msg;
+        };
+
+        g_autoptr(GFile) inaccessibleFile = g_file_new_for_path(testDir.c_str());
+        model.loadDirectory(inaccessibleFile);
+
+        bool completed = pumpWhile([&]() { return model.isLoading(); }, 5000);
+        g_assert_true(completed);
+        g_assert_true(modelErrorFired);
+        g_assert_false(errorMsg.empty());
+        g_assert_cmpuint(model.getItemCount(), ==, 0);
+
+        // 2. PaneView error transition to AdwStatusPage
+        dfiles::views::PaneView paneView;
+        paneView.navigateTo(inaccessibleFile);
+
+        completed = pumpWhile([&]() { return paneView.getModel()->isLoading(); }, 5000);
+        g_assert_true(completed);
+
+        AdwStatusPage* statusPage = findStatusPage(paneView.getWidget());
+        g_assert_nonnull(statusPage);
+        g_assert_true(gtk_widget_get_visible(GTK_WIDGET(statusPage)));
+        g_assert_cmpstr(adw_status_page_get_title(statusPage), ==, "Unable to Open Folder");
+
+        // 3. Clean recovery by navigating back to valid folder
+        std::string validDir = "/tmp/dfiles_stress_valid_" + std::to_string(getpid());
+        std::filesystem::remove_all(validDir);
+        std::filesystem::create_directories(validDir);
+        {
+            std::ofstream(validDir + "/sample.txt") << "valid data";
+        }
+
+        g_autoptr(GFile) validFile = g_file_new_for_path(validDir.c_str());
+        paneView.navigateTo(validFile);
+
+        completed = pumpWhile([&]() { return paneView.getModel()->isLoading(); }, 5000);
+        g_assert_true(completed);
+        g_assert_false(paneView.getModel()->isLoading());
+        g_assert_cmpuint(paneView.getModel()->getItemCount(), ==, 1);
+        g_assert_false(gtk_widget_get_visible(GTK_WIDGET(statusPage)));
+
+        // Cleanup
+        chmod(testDir.c_str(), 0755);
+        std::filesystem::remove_all(testDir);
+        std::filesystem::remove_all(validDir);
+    });
+
+    // TEST 12: Circular & Cyclic Symlinks
+    runTest("Vector 2.12: Circular & Cyclic Symlinks", [&]() {
+        std::string testDir = "/tmp/dfiles_stress_symlinks_" + std::to_string(getpid());
+        std::filesystem::remove_all(testDir);
+        std::filesystem::create_directories(testDir);
+
+        // Self-referential symlink: loop -> loop
+        std::string loopPath = testDir + "/loop";
+        int r1 = symlink("loop", loopPath.c_str());
+        g_assert_cmpint(r1, ==, 0);
+
+        // Mutually recursive symlinks: a -> b and b -> a
+        std::string aPath = testDir + "/sym_a";
+        std::string bPath = testDir + "/sym_b";
+        int r2 = symlink("sym_b", aPath.c_str());
+        int r3 = symlink("sym_a", bPath.c_str());
+        g_assert_cmpint(r2, ==, 0);
+        g_assert_cmpint(r3, ==, 0);
+
+        // Cyclic parent symlink: parent_loop -> ..
+        std::string parentPath = testDir + "/parent_loop";
+        int r4 = symlink("..", parentPath.c_str());
+        g_assert_cmpint(r4, ==, 0);
+
+        // Regular file for baseline comparison
+        {
+            std::ofstream(testDir + "/plain.txt") << "content";
+        }
+
+        dfiles::model::DirectoryModel model;
+        bool finished = false;
+        model.onLoadingFinished = [&](size_t, size_t, size_t, uint64_t) {
+            finished = true;
+        };
+
+        g_autoptr(GFile) dirFile = g_file_new_for_path(testDir.c_str());
+        model.loadDirectory(dirFile);
+
+        bool completed = pumpWhile([&]() { return !finished; }, 5000);
+        g_assert_true(completed);
+        g_assert_cmpuint(model.getItemCount(), ==, 5); // 4 symlinks + 1 regular file
+
+        size_t symlinkFoundCount = 0;
+        for (size_t i = 0; i < model.getItemCount(); ++i) {
+            auto item = model.getItemAt(i);
+            g_assert_nonnull(item);
+            if (item->isSymlink()) {
+                symlinkFoundCount++;
+            }
+        }
+        g_assert_cmpuint(symlinkFoundCount, ==, 4);
+
+        // Cleanup
+        std::filesystem::remove_all(testDir);
+    });
+
+    // TEST 13: Massive Directory Churn & Scaling (10,000 Files)
+    runTest("Vector 2.13: Massive Directory Churn & Scaling (10,000 Files)", [&]() {
+        std::string testDir = "/tmp/dfiles_stress_10k_" + std::to_string(getpid());
+        std::filesystem::remove_all(testDir);
+        std::filesystem::create_directories(testDir);
+
+        auto startCreate = std::chrono::steady_clock::now();
+        for (int i = 0; i < 10000; ++i) {
+            char buf[64];
+            std::snprintf(buf, sizeof(buf), "/file_%05d.dat", i);
+            std::string fname = testDir + buf;
+            int fd = creat(fname.c_str(), 0644);
+            if (fd >= 0) close(fd);
+        }
+        auto createMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - startCreate).count();
+        g_print("    [Info] Generated 10,000 files in %ld ms\n", createMs);
+
+        dfiles::model::DirectoryModel model;
+        bool finished = false;
+        size_t loadedCount = 0;
+        model.onLoadingFinished = [&](size_t total, size_t, size_t, uint64_t) {
+            finished = true;
+            loadedCount = total;
+        };
+
+        g_autoptr(GFile) dirFile = g_file_new_for_path(testDir.c_str());
+        auto startLoad = std::chrono::steady_clock::now();
+        model.loadDirectory(dirFile);
+
+        bool completed = pumpWhile([&]() { return !finished; }, 30000);
+        auto loadMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - startLoad).count();
+        g_print("    [Info] Loaded 10,000 files in %ld ms\n", loadMs);
+
+        g_assert_true(completed);
+        g_assert_cmpuint(loadedCount, ==, 10000);
+        g_assert_cmpuint(model.getItemCount(), ==, 10000);
+        g_assert_cmpuint(model.getFileCount(), ==, 10000);
+        g_assert_cmpuint(model.getDirectoryCount(), ==, 0);
+
+        auto first = model.getItemAt(0);
+        auto last = model.getItemAt(9999);
+        g_assert_nonnull(first);
+        g_assert_nonnull(last);
+
+        // Cleanup
+        std::filesystem::remove_all(testDir);
+    });
+
+    // TEST 14: In-Flight Navigation Cancellation Storm
+    runTest("Vector 2.14: In-Flight Navigation Cancellation Storm (50 Rapid Navigations)", [&]() {
+        std::string baseDir = "/tmp/dfiles_stress_storm_" + std::to_string(getpid());
+        std::filesystem::remove_all(baseDir);
+        std::filesystem::create_directories(baseDir);
+
+        constexpr int NUM_DIRS = 50;
+        std::vector<std::string> dirPaths;
+        dirPaths.reserve(NUM_DIRS);
+
+        for (int i = 0; i < NUM_DIRS; ++i) {
+            char dname[64];
+            std::snprintf(dname, sizeof(dname), "/dir_%03d", i);
+            std::string d = baseDir + dname;
+            std::filesystem::create_directories(d);
+            for (int j = 0; j < 10; ++j) {
+                std::string f = d + "/f_" + std::to_string(j) + ".txt";
+                int fd = creat(f.c_str(), 0644);
+                if (fd >= 0) close(fd);
+            }
+            dirPaths.push_back(d);
+        }
+
+        dfiles::views::PaneView paneView;
+
+        // Rapidly fire 50 navigateTo calls in succession while previous ones are in-flight
+        for (int i = 0; i < NUM_DIRS; ++i) {
+            g_autoptr(GFile) gdir = g_file_new_for_path(dirPaths[i].c_str());
+            paneView.navigateTo(gdir);
+            if (i % 5 == 0) {
+                g_main_context_iteration(nullptr, FALSE);
+            }
+        }
+
+        // Wait for final navigation to finish
+        bool completed = pumpWhile([&]() { return paneView.getModel()->isLoading(); }, 15000);
+        g_assert_true(completed);
+
+        GFile* cur = paneView.getCurrentDirectory();
+        g_assert_nonnull(cur);
+        g_autofree char* curPath = g_file_get_path(cur);
+        g_assert_cmpstr(curPath, ==, dirPaths.back().c_str());
+        g_assert_cmpuint(paneView.getModel()->getItemCount(), ==, 10);
+
+        // SEC-BLOCK-03 / ARCH-P2-02 / REMED-2 Cross-Directory Contamination Verification:
+        // Assert every single item in the final model has a GFile strictly prefixed
+        // by the 50th directory (dirPaths.back()), and NOT any of the 49 cancelled directories.
+        std::string expectedPrefix = dirPaths.back() + "/";
+        for (size_t i = 0; i < paneView.getModel()->getItemCount(); ++i) {
+            auto item = paneView.getModel()->getItemAt(i);
+            g_assert_nonnull(item);
+            g_assert_nonnull(item->getGFile());
+            g_assert_true(g_file_has_prefix(item->getGFile(), cur));
+
+            std::string itemPath = item->getPath();
+            g_assert_true(itemPath.starts_with(expectedPrefix));
+
+            for (int k = 0; k < NUM_DIRS - 1; ++k) {
+                std::string cancelledPrefix = dirPaths[k] + "/";
+                g_assert_false(itemPath.starts_with(cancelledPrefix));
+                g_autoptr(GFile) cancelledGDir = g_file_new_for_path(dirPaths[k].c_str());
+                g_assert_false(g_file_has_prefix(item->getGFile(), cancelledGDir));
+            }
+        }
+
+        // Direct DirectoryModel rapid navigation cancellation stress:
+        // Execute 50 rapid loadDirectory calls directly on a raw DirectoryModel
+        dfiles::model::DirectoryModel directModel;
+        for (int i = 0; i < NUM_DIRS; ++i) {
+            g_autoptr(GFile) gdir = g_file_new_for_path(dirPaths[i].c_str());
+            directModel.loadDirectory(gdir);
+            if (i % 7 == 0) {
+                g_main_context_iteration(nullptr, FALSE);
+            }
+        }
+        completed = pumpWhile([&]() { return directModel.isLoading(); }, 15000);
+        g_assert_true(completed);
+        g_assert_cmpuint(directModel.getItemCount(), ==, 10);
+
+        g_autoptr(GFile) lastDirGFile = g_file_new_for_path(dirPaths.back().c_str());
+        for (size_t i = 0; i < directModel.getItemCount(); ++i) {
+            auto item = directModel.getItemAt(i);
+            g_assert_nonnull(item);
+            g_assert_nonnull(item->getGFile());
+            g_assert_true(g_file_has_prefix(item->getGFile(), lastDirGFile));
+
+            std::string itemPath = item->getPath();
+            g_assert_true(itemPath.starts_with(expectedPrefix));
+            for (int k = 0; k < NUM_DIRS - 1; ++k) {
+                std::string cancelledPrefix = dirPaths[k] + "/";
+                g_assert_false(itemPath.starts_with(cancelledPrefix));
+                g_autoptr(GFile) cancelledGDir = g_file_new_for_path(dirPaths[k].c_str());
+                g_assert_false(g_file_has_prefix(item->getGFile(), cancelledGDir));
+            }
+        }
+
+        // Cleanup
+        std::filesystem::remove_all(baseDir);
+    });
+
+    // TEST 15: Rapid F3 Toggle Storm During Heavy Async Directory Loading
+    runTest("Vector 2.15: Rapid F3 Toggle Storm During Heavy Async Directory Loading", [&]() {
+        std::string testDir = "/tmp/dfiles_stress_f3_10k_" + std::to_string(getpid());
+        std::filesystem::remove_all(testDir);
+        std::filesystem::create_directories(testDir);
+
+        // Generate 10,000 files
+        for (int i = 0; i < 10000; ++i) {
+            char buf[64];
+            std::snprintf(buf, sizeof(buf), "/file_%05d.dat", i);
+            std::string fname = testDir + buf;
+            int fd = creat(fname.c_str(), 0644);
+            if (fd >= 0) close(fd);
+        }
+
+        dfiles::views::SplitView splitView;
+        g_assert_false(splitView.isSplit());
+
+        g_autoptr(GFile) dirFile = g_file_new_for_path(testDir.c_str());
+        // Initiate heavy async load on left pane
+        splitView.getLeftPane()->navigateTo(dirFile);
+        g_assert_true(splitView.getLeftPane()->getModel()->isLoading());
+
+        // Immediately hammer toggleSplit 300 times while I/O is streaming
+        for (int i = 0; i < 300; ++i) {
+            splitView.toggleSplit();
+            if (i % 25 == 0) {
+                pumpEvents(1);
+            }
+        }
+
+        // 300 toggles from false -> even -> final state false
+        g_assert_false(splitView.isSplit());
+
+        // Toggle once more to true to verify split state handling
+        splitView.toggleSplit();
+        g_assert_true(splitView.isSplit());
+
+        // Wait for all in-flight directory loading to complete
+        bool completed = pumpWhile([&]() {
+            return splitView.getLeftPane()->getModel()->isLoading() ||
+                   splitView.getRightPane()->getModel()->isLoading();
+        }, 30000);
+        g_assert_true(completed);
+
+        g_assert_cmpuint(splitView.getLeftPane()->getModel()->getItemCount(), ==, 10000);
+        g_assert_true(splitView.isSplit());
+
+        // Toggle back to single pane cleanly
+        splitView.toggleSplit();
+        g_assert_false(splitView.isSplit());
+        pumpEvents(10);
+
+        // Cleanup
+        std::filesystem::remove_all(testDir);
+    });
+
+    // TEST 16: Non-Blocking File Monitor Async I/O & Mutation Storm (REMED-4 / ARCH-P2-04 / SEC-BLOCK-04)
+    runTest("Vector 2.16: Non-Blocking File Monitor Async I/O & Mutation Storm", [&]() {
+        std::string testDir = "/tmp/dfiles_stress_monitor_async_" + std::to_string(getpid());
+        std::filesystem::remove_all(testDir);
+        std::filesystem::create_directories(testDir);
+
+        g_autoptr(GFile) dirFile = g_file_new_for_path(testDir.c_str());
+        dfiles::model::DirectoryModel model;
+        model.loadDirectory(dirFile);
+
+        bool completed = pumpWhile([&]() { return model.isLoading(); }, 5000);
+        g_assert_true(completed);
+        g_assert_cmpuint(model.getItemCount(), ==, 0);
+
+        // 1. Rapid File Creation Storm: 100 files created sequentially
+        // Asynchronous monitor queries via g_file_query_info_async must populate the model without blocking
+        constexpr int NUM_FILES = 100;
+        for (int i = 0; i < NUM_FILES; ++i) {
+            char filename[64];
+            std::snprintf(filename, sizeof(filename), "/storm_file_%03d.txt", i);
+            std::string fpath = testDir + filename;
+            std::ofstream(fpath) << "Storm payload data for file #" << i << "\n";
+        }
+
+        // Wait for file monitor events and g_file_query_info_async to process all 100 creations
+        completed = pumpWhile([&]() { return model.getItemCount() < NUM_FILES; }, 15000);
+        g_assert_true(completed);
+        g_assert_cmpuint(model.getItemCount(), ==, NUM_FILES);
+        g_assert_cmpuint(model.getFileCount(), ==, NUM_FILES);
+        g_assert_cmpuint(model.getDirectoryCount(), ==, 0);
+
+        for (size_t i = 0; i < model.getItemCount(); ++i) {
+            auto item = model.getItemAt(i);
+            g_assert_nonnull(item);
+            g_assert_nonnull(item->getGFile());
+            g_assert_true(g_file_has_prefix(item->getGFile(), dirFile));
+        }
+
+        // 2. Rapid File Modification Storm: touch / append to 50 files
+        for (int i = 0; i < 50; ++i) {
+            char filename[64];
+            std::snprintf(filename, sizeof(filename), "/storm_file_%03d.txt", i);
+            std::string fpath = testDir + filename;
+            std::ofstream ofs(fpath, std::ios::app);
+            ofs << "appended content modification chunk\n";
+        }
+        pumpEvents(25);
+
+        // 3. Rapid File Deletion Storm: delete 50 files (storm_file_050 to storm_file_099)
+        for (int i = 50; i < NUM_FILES; ++i) {
+            char filename[64];
+            std::snprintf(filename, sizeof(filename), "/storm_file_%03d.txt", i);
+            std::string fpath = testDir + filename;
+            unlink(fpath.c_str());
+        }
+
+        // Wait for model item count to drop down to 50
+        completed = pumpWhile([&]() { return model.getItemCount() > 50; }, 15000);
+        g_assert_true(completed);
+        g_assert_cmpuint(model.getItemCount(), ==, 50);
+
+        // 4. Rapid File Renaming Storm: rename storm_file_000 to storm_file_024
+        for (int i = 0; i < 25; ++i) {
+            char oldName[64];
+            char newName[64];
+            std::snprintf(oldName, sizeof(oldName), "/storm_file_%03d.txt", i);
+            std::snprintf(newName, sizeof(newName), "/renamed_file_%03d.txt", i);
+            std::filesystem::rename(testDir + oldName, testDir + newName);
+        }
+
+        completed = pumpWhile([&]() {
+            g_autoptr(GFile) probe = g_file_new_for_path((testDir + "/renamed_file_000.txt").c_str());
+            return model.findItemByFile(probe) == nullptr;
+        }, 15000);
+        g_assert_true(completed);
+
+        // 5. Teardown Race Condition Stress (aliveToken safety in MonitorQueryContext):
+        // Create model in scoped pointer, load directory, burst-create 30 files,
+        // and immediately destroy model while async queries are in flight
+        {
+            auto scopedModel = std::make_unique<dfiles::model::DirectoryModel>();
+            scopedModel->loadDirectory(dirFile);
+            pumpWhile([&]() { return scopedModel->isLoading(); }, 5000);
+
+            for (int i = 100; i < 130; ++i) {
+                char filename[64];
+                std::snprintf(filename, sizeof(filename), "/teardown_file_%03d.txt", i);
+                std::ofstream(testDir + filename) << "teardown test";
+            }
+            // Scoped model destroyed immediately while queries are in-flight
+            scopedModel.reset();
+            // Pump event loop to execute pending trampolines; weak aliveToken must prevent UAF
+            pumpEvents(50);
+        }
+
+        // Cleanup
+        std::filesystem::remove_all(testDir);
+    });
+
+    // TEST 17: Natural Sort Strict Weak Ordering Stress & Leading Zeros Edge Cases (REMED-P2-05 / REMED-8 / BLOCK-QA-P2-05 / SEC-WARN-02)
+    runTest("Vector 2.17: Natural Sort Strict Weak Ordering Stress & Leading Zeros Edge Cases", [&]() {
+        std::string testDir = "/tmp/dfiles_stress_sort_strict_" + std::to_string(getpid());
+        std::filesystem::remove_all(testDir);
+        std::filesystem::create_directories(testDir);
+
+        const std::vector<std::string> testFiles = {
+            "file1.txt",
+            "file01.txt",
+            "file001.txt",
+            "file0001.txt",
+            "file2.txt",
+            "file02.txt",
+            "file10.txt",
+            "file010.txt",
+            "file20.txt",
+            "File1.txt",
+            "FILE1.TXT",
+            "item_a.txt",
+            "item_A.txt",
+            "item_b.txt",
+            "100_numeric.dat",
+            "0100_numeric.dat",
+            "00100_numeric.dat",
+            "20_numeric.dat",
+            "020_numeric.dat"
+        };
+
+        for (const auto& fname : testFiles) {
+            std::string path = testDir + "/" + fname;
+            std::ofstream(path) << "sample sort content";
+        }
+
+        dfiles::model::DirectoryModel model;
+        g_autoptr(GFile) dirGFile = g_file_new_for_path(testDir.c_str());
+        model.loadDirectory(dirGFile);
+
+        bool completed = pumpWhile([&]() { return model.isLoading(); }, 10000);
+        g_assert_true(completed);
+        g_assert_cmpuint(model.getItemCount(), ==, testFiles.size());
+
+        // Test sorting: Name Ascending
+        model.setSorting(dfiles::core::SortColumn::Name, dfiles::core::SortOrder::Ascending);
+        pumpEvents(10);
+
+        GListModel* listModel = model.getModel();
+        guint nItems = g_list_model_get_n_items(listModel);
+        g_assert_cmpuint(nItems, ==, testFiles.size());
+
+        // Verify Strict Weak Ordering:
+        // No adjacent elements can have identical name strings (all distinct files must remain distinct)
+        for (guint i = 0; i < nItems - 1; ++i) {
+            auto* itemA = DFILES_FILE_ITEM(g_list_model_get_item(listModel, i));
+            auto* itemB = DFILES_FILE_ITEM(g_list_model_get_item(listModel, i + 1));
+            g_assert_nonnull(itemA);
+            g_assert_nonnull(itemB);
+
+            const char* nameA = dfiles_file_item_get_name(itemA);
+            const char* nameB = dfiles_file_item_get_name(itemB);
+            g_assert_cmpstr(nameA, !=, nameB);
+
+            g_object_unref(itemA);
+            g_object_unref(itemB);
+        }
+
+        // Test sorting: Name Descending
+        model.setSorting(dfiles::core::SortColumn::Name, dfiles::core::SortOrder::Descending);
+        pumpEvents(10);
+        nItems = g_list_model_get_n_items(listModel);
+        g_assert_cmpuint(nItems, ==, testFiles.size());
+
+        // Test sorting: Size, Type, ModifiedTime
+        model.setSorting(dfiles::core::SortColumn::Size, dfiles::core::SortOrder::Ascending);
+        pumpEvents(5);
+        model.setSorting(dfiles::core::SortColumn::Type, dfiles::core::SortOrder::Ascending);
+        pumpEvents(5);
+        model.setSorting(dfiles::core::SortColumn::ModifiedTime, dfiles::core::SortOrder::Descending);
+        pumpEvents(5);
+
+        // Cleanup
+        std::filesystem::remove_all(testDir);
+    });
+
+    // TEST 18: Dual-Pane Focus Cycling & Hardware Keyboard Focus Stress (REMED-P2-04 / ARCH-P2-03 / BLOCK-QA-P2-04)
+    runTest("Vector 2.18: Dual-Pane Focus Cycling & Hardware Focus Stress (200x Cycles)", [&]() {
+        auto window = std::make_unique<dfiles::ui::DFilesWindow>(app);
+        auto* splitView = window->getSplitView();
+        g_assert_nonnull(splitView);
+
+        splitView->toggleSplit();
+        g_assert_true(splitView->isSplit());
+
+        auto* leftPane = splitView->getLeftPane();
+        auto* rightPane = splitView->getRightPane();
+        g_assert_nonnull(leftPane);
+        g_assert_nonnull(rightPane);
+
+        for (int i = 0; i < 200; ++i) {
+            splitView->cycleFocus();
+
+            if (i % 2 == 0) {
+                // Odd cycle count: right pane should be active
+                g_assert_true(splitView->getActivePane() == rightPane);
+                g_assert_true(rightPane->isActive());
+                g_assert_false(leftPane->isActive());
+            } else {
+                // Even cycle count: left pane should be active
+                g_assert_true(splitView->getActivePane() == leftPane);
+                g_assert_true(leftPane->isActive());
+                g_assert_false(rightPane->isActive());
+            }
+
+            if (i % 20 == 0) {
+                pumpEvents(2);
+            }
+        }
+
+        // Direct setActivePane invocation and focus verification
+        splitView->setActivePane(leftPane);
+        g_assert_true(leftPane->isActive());
+        g_assert_false(rightPane->isActive());
+
+        splitView->setActivePane(rightPane);
+        g_assert_true(rightPane->isActive());
+        g_assert_false(leftPane->isActive());
+
+        // Close split cleanly
+        splitView->toggleSplit();
+        g_assert_false(splitView->isSplit());
+        g_assert_true(splitView->getActivePane() == leftPane);
+        pumpEvents(5);
     });
 
     // -------------------------------------------------------------

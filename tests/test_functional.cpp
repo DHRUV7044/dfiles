@@ -1,11 +1,20 @@
 #include "core/app.hpp"
 #include "core/types.hpp"
+#include "model/directory_model.hpp"
+#include "model/file_item.hpp"
 #include "ui/headerbar.hpp"
 #include "ui/sidebar.hpp"
 #include "ui/window.hpp"
+#include "views/file_view.hpp"
+#include "views/pane_view.hpp"
+#include "views/split_view.hpp"
 
 #include <adwaita.h>
+#include <algorithm>
 #include <cassert>
+#include <chrono>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -46,15 +55,25 @@ bool hasAccel(GtkApplication* app, const char* actionName, const char* expectedA
     return false;
 }
 
+[[maybe_unused]] void pumpMainLoop(int iterations = 10) {
+    for (int i = 0; i < iterations; ++i) {
+        while (g_main_context_iteration(nullptr, FALSE)) {
+            // Process pending main context events
+        }
+        g_usleep(2000); // 2ms
+    }
+}
+
 } // namespace
 
 int main(int /*argc*/, char* /*argv*/[]) {
     std::cout << "=========================================================\n";
-    std::cout << "  DFILES PHASE 1: COMPREHENSIVE FUNCTIONAL TEST SUITE    \n";
+    std::cout << "  DFILES: COMPREHENSIVE FUNCTIONAL TEST SUITE (PHASES 1 & 2)\n";
     std::cout << "=========================================================\n\n";
 
     // 1. Initialize Libadwaita & GTK4
     adw_init();
+    g_main_context_acquire(g_main_context_default());
 
     // -------------------------------------------------------------
     // Test Section 1: Core Types & String Helpers
@@ -70,8 +89,6 @@ int main(int /*argc*/, char* /*argv*/[]) {
         testAssert(std::string(sortOrderToString(SortOrder::Descending)) == "Descending", "sortOrderToString Descending");
     }
     std::cout << std::endl;
-
-    dfiles::core::DFilesApp app;
 
     // -------------------------------------------------------------
     // Test Section 2: DFilesApp & GAction / Accelerator Lookup
@@ -308,6 +325,518 @@ int main(int /*argc*/, char* /*argv*/[]) {
         app.onActionAbout();
         app.onActionAbout(); // Repeated call must not stack dialogs
         testAssert(true, "DFilesApp onActionAbout presented & deduplicated cleanly");
+    }
+    std::cout << std::endl;
+
+    // =============================================================
+    // PHASE 2 FUNCTIONAL TEST SUITES
+    // =============================================================
+
+    // -------------------------------------------------------------
+    // Test Section 6 (Phase 2 Suite 1): FileItem Unit Verification
+    // -------------------------------------------------------------
+    std::cout << "--- Test Section 6: FileItem Unit Verification ---\n";
+    {
+        std::string tempBase = std::filesystem::temp_directory_path() /
+            ("dfiles_test_fileitem_" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count()));
+        std::filesystem::create_directories(tempBase);
+
+        // 1. Create regular sample file (known size: 48 bytes)
+        std::string regularFilePath = tempBase + "/sample.txt";
+        {
+            std::ofstream ofs(regularFilePath, std::ios::binary);
+            ofs << "123456789012345678901234567890123456789012345678"; // 48 bytes
+        }
+        std::filesystem::permissions(regularFilePath,
+            std::filesystem::perms::owner_read | std::filesystem::perms::owner_write |
+            std::filesystem::perms::group_read | std::filesystem::perms::others_read); // 0644
+
+        // 2. Create sample directory
+        std::string sampleDirPath = tempBase + "/sample_folder";
+        std::filesystem::create_directories(sampleDirPath);
+        std::filesystem::permissions(sampleDirPath,
+            std::filesystem::perms::owner_all |
+            std::filesystem::perms::group_read | std::filesystem::perms::group_exec |
+            std::filesystem::perms::others_read | std::filesystem::perms::others_exec); // 0755
+
+        // 3. Create hidden dotfile
+        std::string hiddenFilePath = tempBase + "/.hidden_file";
+        {
+            std::ofstream ofs(hiddenFilePath, std::ios::binary);
+            ofs << "secret";
+        }
+
+        // 4. Create symlink
+        std::string symlinkPath = tempBase + "/sample_symlink";
+        std::filesystem::create_symlink(regularFilePath, symlinkPath);
+
+        // Query attributes using GFile and GFileInfo
+        g_autoptr(GFile) gRegularFile = g_file_new_for_path(regularFilePath.c_str());
+        g_autoptr(GFileInfo) regularInfo = g_file_query_info(gRegularFile, "*", G_FILE_QUERY_INFO_NOFOLLOW_SYMLINKS, nullptr, nullptr);
+        testAssert(regularInfo != nullptr, "Queried GFileInfo for regular file");
+
+        dfiles::model::FileItem fileItem(gRegularFile, regularInfo);
+
+        // Assert attributes for regular file
+        testAssert(fileItem.getName() == "sample.txt", "FileItem getName() matches 'sample.txt'");
+        testAssert(fileItem.getDisplayName() == "sample.txt", "FileItem getDisplayName() matches 'sample.txt'");
+        testAssert(fileItem.getPath() == regularFilePath, "FileItem getPath() matches regularFilePath");
+        testAssert(fileItem.getSize() == 48, "FileItem getSize() == 48 bytes");
+        testAssert(fileItem.getFormattedSize().find("48") != std::string::npos, "FileItem getFormattedSize() contains '48'");
+        testAssert(!fileItem.isDirectory(), "FileItem isDirectory() is false for file");
+        testAssert(!fileItem.isHidden(), "FileItem isHidden() is false for regular file");
+        testAssert(!fileItem.isSymlink(), "FileItem isSymlink() is false for regular file");
+        testAssert(fileItem.getPermissionsString().find("rw-r--r--") != std::string::npos, "FileItem getPermissionsString() matches 0644 ('rw-r--r--')");
+        testAssert(fileItem.getGObject() != nullptr, "FileItem getGObject() non-null");
+        testAssert(fileItem.getGFile() != nullptr, "FileItem getGFile() non-null");
+        testAssert(fileItem.getGFileInfo() != nullptr, "FileItem getGFileInfo() non-null");
+        testAssert(fileItem.getIcon() != nullptr, "FileItem getIcon() non-null");
+        testAssert(!fileItem.getMimeType().empty(), "FileItem getMimeType() non-empty");
+
+        // Directory Item Verification
+        g_autoptr(GFile) gDirFile = g_file_new_for_path(sampleDirPath.c_str());
+        g_autoptr(GFileInfo) dirInfo = g_file_query_info(gDirFile, "*", G_FILE_QUERY_INFO_NOFOLLOW_SYMLINKS, nullptr, nullptr);
+        dfiles::model::FileItem dirItem(gDirFile, dirInfo);
+        testAssert(dirItem.getName() == "sample_folder", "Directory FileItem getName() matches");
+        testAssert(dirItem.isDirectory(), "Directory FileItem isDirectory() is true");
+        testAssert(dirItem.getFormattedSize() == "--", "Directory FileItem getFormattedSize() is '--'");
+        testAssert(dirItem.getPermissionsString().find("rwxr-xr-x") != std::string::npos, "Directory FileItem getPermissionsString() matches 0755");
+
+        // Hidden Item Verification
+        g_autoptr(GFile) gHiddenFile = g_file_new_for_path(hiddenFilePath.c_str());
+        g_autoptr(GFileInfo) hiddenInfo = g_file_query_info(gHiddenFile, "*", G_FILE_QUERY_INFO_NOFOLLOW_SYMLINKS, nullptr, nullptr);
+        dfiles::model::FileItem hiddenItem(gHiddenFile, hiddenInfo);
+        testAssert(hiddenItem.getName() == ".hidden_file", "Hidden FileItem getName() matches");
+        testAssert(hiddenItem.isHidden(), "Hidden FileItem isHidden() is true");
+
+        // Symlink Item Verification
+        g_autoptr(GFile) gSymlinkFile = g_file_new_for_path(symlinkPath.c_str());
+        g_autoptr(GFileInfo) linkInfo = g_file_query_info(gSymlinkFile, "*", G_FILE_QUERY_INFO_NOFOLLOW_SYMLINKS, nullptr, nullptr);
+        dfiles::model::FileItem linkItem(gSymlinkFile, linkInfo);
+        testAssert(linkItem.isSymlink(), "Symlink FileItem isSymlink() is true");
+
+        // Copy constructor & copy assignment
+        dfiles::model::FileItem copyItem(fileItem);
+        testAssert(copyItem.getName() == fileItem.getName(), "FileItem copy constructor name match");
+        testAssert(copyItem.getSize() == fileItem.getSize(), "FileItem copy constructor size match");
+        testAssert(copyItem.getGObject() == fileItem.getGObject(), "FileItem copy constructor refs same GObject");
+
+        dfiles::model::FileItem assignItem = dirItem;
+        testAssert(assignItem.getName() == dirItem.getName(), "FileItem copy assignment name match");
+        testAssert(assignItem.isDirectory() == dirItem.isDirectory(), "FileItem copy assignment isDirectory match");
+
+        // Move constructor & move assignment
+        dfiles::model::FileItem moveItem(std::move(copyItem));
+        testAssert(moveItem.getName() == fileItem.getName(), "FileItem move constructor name match");
+        testAssert(moveItem.getSize() == fileItem.getSize(), "FileItem move constructor size match");
+
+        dfiles::model::FileItem moveAssignItem = std::move(assignItem);
+        testAssert(moveAssignItem.getName() == dirItem.getName(), "FileItem move assignment name match");
+        testAssert(moveAssignItem.isDirectory() == dirItem.isDirectory(), "FileItem move assignment isDirectory match");
+
+        // Clean up
+        std::filesystem::remove_all(tempBase);
+    }
+    std::cout << std::endl;
+
+    // -------------------------------------------------------------
+    // Test Section 7 (Phase 2 Suite 2): DirectoryModel Enumeration, Sorting & Filtering
+    // -------------------------------------------------------------
+    std::cout << "--- Test Section 7: DirectoryModel Enumeration, Sorting & Filtering ---\n";
+    {
+        std::string testDir = std::filesystem::temp_directory_path() /
+            ("dfiles_test_dirmodel_" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count()));
+        std::filesystem::create_directories(testDir);
+
+        // Create test hierarchy: hidden files, nested folders, mixed files (file1, file2, file10)
+        std::string hiddenFile = testDir + "/.hidden";
+        { std::ofstream ofs(hiddenFile); ofs << "hidden"; }
+
+        std::string folderB = testDir + "/folderB";
+        std::string folderA = testDir + "/folderA";
+        std::filesystem::create_directories(folderB);
+        std::filesystem::create_directories(folderA);
+
+        std::string file1 = testDir + "/file1.txt";
+        std::string file2 = testDir + "/file2.txt";
+        std::string file10 = testDir + "/file10.txt";
+        std::string otherFile = testDir + "/archive.zip";
+        { std::ofstream ofs(file1); ofs << "file 1"; }
+        { std::ofstream ofs(file2); ofs << "file 2"; }
+        { std::ofstream ofs(file10); ofs << "file 10"; }
+        { std::ofstream ofs(otherFile); ofs << "zip"; }
+
+        dfiles::model::DirectoryModel dirModel;
+        testAssert(dirModel.getModel() != nullptr, "DirectoryModel getModel() non-null");
+
+        g_autoptr(GFile) gTestDir = g_file_new_for_path(testDir.c_str());
+        bool loadDone = false;
+        dirModel.onLoadingFinished = [&](size_t, size_t, size_t, uint64_t) {
+            loadDone = true;
+        };
+
+        dirModel.loadDirectory(gTestDir);
+        for (int i = 0; i < 200 && !loadDone; ++i) {
+            pumpMainLoop(5);
+        }
+        testAssert(loadDone, "DirectoryModel loadDirectory finished async loading");
+        testAssert(!dirModel.isLoading(), "DirectoryModel isLoading() is false after load");
+
+        // 1. Verify showHidden(false) excludes hidden files
+        dirModel.setShowHidden(false);
+        pumpMainLoop(5);
+        GListModel* model = dirModel.getModel();
+        guint nItems = g_list_model_get_n_items(model);
+        bool foundHidden = false;
+        for (guint i = 0; i < nItems; ++i) {
+            g_autoptr(DfilesFileItem) it = DFILES_FILE_ITEM(g_list_model_get_item(model, i));
+            if (dfiles_file_item_is_hidden(it)) {
+                foundHidden = true;
+            }
+        }
+        testAssert(!foundHidden, "showHidden(false) excludes .hidden file");
+
+        // 2. Verify showHidden(true) includes hidden files
+        dirModel.setShowHidden(true);
+        pumpMainLoop(5);
+        model = dirModel.getModel();
+        nItems = g_list_model_get_n_items(model);
+        foundHidden = false;
+        for (guint i = 0; i < nItems; ++i) {
+            g_autoptr(DfilesFileItem) it = DFILES_FILE_ITEM(g_list_model_get_item(model, i));
+            if (dfiles_file_item_is_hidden(it)) {
+                foundHidden = true;
+            }
+        }
+        testAssert(foundHidden, "showHidden(true) includes .hidden file");
+
+        // 3. Verify natural sorting: folders strictly precede files; files sort naturally (file1 < file2 < file10)
+        dirModel.setShowHidden(false);
+        dirModel.setSorting(dfiles::core::SortColumn::Name, dfiles::core::SortOrder::Ascending);
+        pumpMainLoop(5);
+        model = dirModel.getModel();
+        nItems = g_list_model_get_n_items(model);
+
+        std::vector<std::string> names;
+        std::vector<bool> isDirList;
+        for (guint i = 0; i < nItems; ++i) {
+            g_autoptr(DfilesFileItem) it = DFILES_FILE_ITEM(g_list_model_get_item(model, i));
+            names.push_back(dfiles_file_item_get_name(it));
+            isDirList.push_back(dfiles_file_item_is_directory(it) == TRUE);
+        }
+
+        bool foldersFirst = true;
+        bool seenFile = false;
+        for (bool isDir : isDirList) {
+            if (!isDir) {
+                seenFile = true;
+            } else if (seenFile && isDir) {
+                foldersFirst = false;
+                break;
+            }
+        }
+        testAssert(foldersFirst, "Natural sorting: folders strictly precede files");
+
+        // Extract files and verify natural ordering
+        std::vector<std::string> fileNames;
+        for (size_t i = 0; i < names.size(); ++i) {
+            if (!isDirList[i]) {
+                fileNames.push_back(names[i]);
+            }
+        }
+        auto it1 = std::find(fileNames.begin(), fileNames.end(), "file1.txt");
+        auto it2 = std::find(fileNames.begin(), fileNames.end(), "file2.txt");
+        auto it10 = std::find(fileNames.begin(), fileNames.end(), "file10.txt");
+        bool naturalOrder = (it1 != fileNames.end() && it2 != fileNames.end() && it10 != fileNames.end() && it1 < it2 && it2 < it10);
+        testAssert(naturalOrder, "Natural sorting: files sort naturally (file1.txt < file2.txt < file10.txt)");
+
+        // 4. Test search filter query (setSearchFilter)
+        dirModel.setSearchFilter("file1");
+        pumpMainLoop(5);
+        model = dirModel.getModel();
+        nItems = g_list_model_get_n_items(model);
+        bool searchMatch = true;
+        for (guint i = 0; i < nItems; ++i) {
+            g_autoptr(DfilesFileItem) it = DFILES_FILE_ITEM(g_list_model_get_item(model, i));
+            std::string n = dfiles_file_item_get_name(it);
+            if (n.find("file1") == std::string::npos) {
+                searchMatch = false;
+            }
+        }
+        testAssert(searchMatch && nItems == 2, "setSearchFilter('file1') filters exactly to file1.txt and file10.txt");
+
+        dirModel.setSearchFilter("");
+        pumpMainLoop(5);
+        testAssert(g_list_model_get_n_items(dirModel.getModel()) == 6, "Clearing search filter restores all non-hidden items (6 items)");
+
+        // 5. REMED-5: Verify naturalCompare with leading zeros returns non-zero (!= 0)
+        int cmp1 = dfiles::model::naturalCompare("file01.txt", "file1.txt");
+        int cmp2 = dfiles::model::naturalCompare("file1.txt", "file01.txt");
+        testAssert(cmp1 != 0, "naturalCompare with leading zeros: 'file01.txt' vs 'file1.txt' returns non-zero (!= 0)",
+                   "Result: " + std::to_string(cmp1));
+        testAssert(cmp2 != 0, "naturalCompare with leading zeros: 'file1.txt' vs 'file01.txt' returns non-zero (!= 0)",
+                   "Result: " + std::to_string(cmp2));
+        testAssert((cmp1 < 0 && cmp2 > 0) || (cmp1 > 0 && cmp2 < 0),
+                   "naturalCompare leading zero ordering is anti-symmetric");
+        testAssert(dfiles::model::naturalCompare("file1.txt", "file1.txt") == 0,
+                   "naturalCompare with identical strings returns 0");
+
+        // Clean up
+        std::filesystem::remove_all(testDir);
+    }
+    std::cout << std::endl;
+
+    // -------------------------------------------------------------
+    // Test Section 8 (Phase 2 Suite 3): PaneView Navigation & History Stack
+    // -------------------------------------------------------------
+    std::cout << "--- Test Section 8: PaneView Navigation & History Stack ---\n";
+    {
+        std::string baseDir = std::filesystem::temp_directory_path() /
+            ("dfiles_test_pane_" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count()));
+        std::string dirA = baseDir + "/dirA";
+        std::string dirB = dirA + "/dirB";
+        std::string dirC = dirB + "/dirC";
+        std::filesystem::create_directories(dirC);
+
+        std::string selFile1 = dirA + "/sel_alpha.txt";
+        std::string selFile2 = dirA + "/sel_beta.txt";
+        { std::ofstream ofs(selFile1); ofs << "alpha"; }
+        { std::ofstream ofs(selFile2); ofs << "beta"; }
+
+        g_autoptr(GFile) gDirA = g_file_new_for_path(dirA.c_str());
+        g_autoptr(GFile) gDirB = g_file_new_for_path(dirB.c_str());
+        g_autoptr(GFile) gDirC = g_file_new_for_path(dirC.c_str());
+
+        dfiles::views::PaneView paneView;
+        testAssert(paneView.getWidget() != nullptr, "PaneView getWidget() non-null");
+        testAssert(paneView.getModel() != nullptr, "PaneView getModel() non-null");
+        testAssert(paneView.getFileView() != nullptr, "PaneView getFileView() non-null");
+
+        // Navigate: dirA -> dirB -> dirC
+        paneView.navigateTo(gDirA);
+        pumpMainLoop(10);
+        testAssert(paneView.getCurrentDirectory() != nullptr && g_file_equal(paneView.getCurrentDirectory(), gDirA),
+                   "PaneView navigated to dirA");
+
+        paneView.navigateTo(gDirB);
+        pumpMainLoop(10);
+        testAssert(paneView.getCurrentDirectory() != nullptr && g_file_equal(paneView.getCurrentDirectory(), gDirB),
+                   "PaneView navigated to dirB");
+
+        paneView.navigateTo(gDirC);
+        pumpMainLoop(10);
+        testAssert(paneView.getCurrentDirectory() != nullptr && g_file_equal(paneView.getCurrentDirectory(), gDirC),
+                   "PaneView navigated to dirC");
+
+        // Assert goBack() returns to dirB, then dirA
+        paneView.goBack();
+        pumpMainLoop(10);
+        testAssert(paneView.getCurrentDirectory() != nullptr && g_file_equal(paneView.getCurrentDirectory(), gDirB),
+                   "PaneView goBack() returned to dirB");
+
+        paneView.goBack();
+        pumpMainLoop(10);
+        testAssert(paneView.getCurrentDirectory() != nullptr && g_file_equal(paneView.getCurrentDirectory(), gDirA),
+                   "PaneView goBack() returned to dirA");
+
+        // Boundary conditions: calling goBack() on empty stack is safe and stays on dirA
+        paneView.goBack();
+        pumpMainLoop(5);
+        testAssert(paneView.getCurrentDirectory() != nullptr && g_file_equal(paneView.getCurrentDirectory(), gDirA),
+                   "Boundary condition: goBack() at start of history is safe and preserves dirA");
+
+        // Assert goForward() moves forward to dirB
+        paneView.goForward();
+        pumpMainLoop(10);
+        testAssert(paneView.getCurrentDirectory() != nullptr && g_file_equal(paneView.getCurrentDirectory(), gDirB),
+                   "PaneView goForward() moved forward to dirB");
+
+        // Assert navigateUp() moves to parent directory (dirA)
+        paneView.navigateUp();
+        pumpMainLoop(10);
+        testAssert(paneView.getCurrentDirectory() != nullptr && g_file_equal(paneView.getCurrentDirectory(), gDirA),
+                   "PaneView navigateUp() moved to parent dirA");
+
+        // View mode switching: ViewMode::List vs ViewMode::Grid
+        testAssert(paneView.getFileView()->getViewMode() == dfiles::core::ViewMode::List, "PaneView default view mode is List");
+        paneView.getFileView()->setViewMode(dfiles::core::ViewMode::Grid);
+        testAssert(paneView.getFileView()->getViewMode() == dfiles::core::ViewMode::Grid, "PaneView switched view mode to Grid");
+        paneView.getFileView()->setViewMode(dfiles::core::ViewMode::List);
+        testAssert(paneView.getFileView()->getViewMode() == dfiles::core::ViewMode::List, "PaneView switched view mode back to List");
+
+        // REMED-6: FileView::getSelectedItems() and PaneView::getSelectedItems() RAII verification
+        paneView.getFileView()->selectAll();
+        pumpMainLoop(10);
+        std::vector<dfiles::model::FileItem> paneSelected = paneView.getSelectedItems();
+        std::vector<dfiles::model::FileItem> fileViewSelected = paneView.getFileView()->getSelectedItems();
+        testAssert(!paneSelected.empty(), "PaneView::getSelectedItems() returns non-empty vector after selectAll()",
+                   std::to_string(paneSelected.size()) + " items selected");
+        testAssert(paneSelected.size() == fileViewSelected.size(),
+                   "PaneView and FileView getSelectedItems() return matching counts");
+        bool allValidRAII = true;
+        for (const auto& item : paneSelected) {
+            if (item.getGObject() == nullptr || !DFILES_IS_FILE_ITEM(item.getGObject()) ||
+                item.getGFile() == nullptr || item.getName().empty()) {
+                allValidRAII = false;
+                break;
+            }
+        }
+        testAssert(allValidRAII, "All selected items have valid RAII GObject and GFile references");
+
+        // Verify copy & move semantics preserves RAII validity
+        if (!paneSelected.empty()) {
+            dfiles::model::FileItem itemCopy = paneSelected[0];
+            testAssert(itemCopy.getGObject() == paneSelected[0].getGObject(),
+                       "Selected FileItem copy retains valid GObject ref");
+            dfiles::model::FileItem itemMoved = std::move(itemCopy);
+            testAssert(itemMoved.getGObject() != nullptr,
+                       "Selected FileItem move retains valid GObject ref");
+        }
+
+        // Verify unselectAll clears selection
+        paneView.getFileView()->unselectAll();
+        pumpMainLoop(5);
+        testAssert(paneView.getSelectedItems().empty(),
+                   "PaneView::getSelectedItems() is empty after unselectAll()");
+        testAssert(paneView.getFileView()->getSelectedItems().empty(),
+                   "FileView::getSelectedItems() is empty after unselectAll()");
+
+        // Clean up
+        std::filesystem::remove_all(baseDir);
+    }
+    std::cout << std::endl;
+
+    // -------------------------------------------------------------
+    // Test Section 9 (Phase 2 Suite 4): SplitView & F3 Dual-Pane
+    // -------------------------------------------------------------
+    std::cout << "--- Test Section 9: SplitView & F3 Dual-Pane ---\n";
+    {
+        dfiles::views::SplitView splitView;
+        testAssert(splitView.getWidget() != nullptr, "SplitView getWidget() non-null");
+        testAssert(!splitView.isSplit(), "SplitView initializes in single-pane mode (!isSplit())");
+        testAssert(splitView.getLeftPane() != nullptr, "SplitView getLeftPane() non-null");
+        testAssert(splitView.getRightPane() != nullptr, "SplitView getRightPane() non-null");
+        testAssert(splitView.getActivePane() == splitView.getLeftPane(), "SplitView active pane defaults to left pane");
+        testAssert(gtk_widget_get_visible(splitView.getRightPane()->getWidget()) == FALSE,
+                   "SplitView right pane initially hidden");
+
+        // REMED-4: Verify SplitView::cycleFocus() and setActivePane() route focus via grabFocus()
+        g_object_ref_sink(splitView.getWidget());
+        GtkWidget* testWin = gtk_window_new();
+        gtk_window_set_child(GTK_WINDOW(testWin), splitView.getWidget());
+        gtk_window_present(GTK_WINDOW(testWin));
+        pumpMainLoop(10);
+
+        GtkRoot* root = gtk_widget_get_root(splitView.getWidget());
+        testAssert(root != nullptr, "SplitView has valid GtkRoot when placed in presented window");
+
+        // Call toggleSplit(): assert isSplit() == true, right pane becomes visible, both have active/inactive states
+        splitView.toggleSplit();
+        testAssert(splitView.isSplit() == true, "SplitView toggleSplit() sets isSplit() == true");
+        testAssert(gtk_widget_get_visible(splitView.getRightPane()->getWidget()) == TRUE,
+                   "SplitView right pane becomes visible when split");
+        testAssert(splitView.getLeftPane()->isActive() == true, "Left pane has active state");
+        testAssert(splitView.getRightPane()->isActive() == false, "Right pane has inactive state");
+
+        // 1. Initial grabFocus() routes keyboard focus to left pane
+        splitView.getActivePane()->grabFocus();
+        pumpMainLoop(5);
+        GtkWidget* focused = root ? gtk_root_get_focus(root) : nullptr;
+        bool leftHasFocus = focused && (focused == splitView.getLeftPane()->getWidget() ||
+                                        gtk_widget_is_ancestor(focused, splitView.getLeftPane()->getWidget()));
+        testAssert(leftHasFocus, "splitView.getActivePane()->grabFocus() routes keyboard focus to left pane");
+
+        // 2. setActivePane(rightPane) routes focus to right pane via grabFocus()
+        splitView.setActivePane(splitView.getRightPane());
+        pumpMainLoop(5);
+        testAssert(splitView.getActivePane() == splitView.getRightPane(), "setActivePane() sets right pane as active");
+        testAssert(splitView.getRightPane()->isActive() == true, "Right pane active state is true");
+        testAssert(splitView.getLeftPane()->isActive() == false, "Left pane active state is false");
+        focused = root ? gtk_root_get_focus(root) : nullptr;
+        bool rightHasFocus = focused && (focused == splitView.getRightPane()->getWidget() ||
+                                         gtk_widget_is_ancestor(focused, splitView.getRightPane()->getWidget()));
+        testAssert(rightHasFocus, "setActivePane(rightPane) routes focus to right pane via grabFocus()");
+
+        // 3. cycleFocus() routes focus back to left pane via grabFocus()
+        splitView.cycleFocus();
+        pumpMainLoop(5);
+        testAssert(splitView.getActivePane() == splitView.getLeftPane(), "cycleFocus() switches active pane back to left");
+        focused = root ? gtk_root_get_focus(root) : nullptr;
+        leftHasFocus = focused && (focused == splitView.getLeftPane()->getWidget() ||
+                                   gtk_widget_is_ancestor(focused, splitView.getLeftPane()->getWidget()));
+        testAssert(leftHasFocus, "cycleFocus() routes keyboard focus back to left pane via grabFocus()");
+
+        // 4. cycleFocus() routes focus again to right pane via grabFocus()
+        splitView.cycleFocus();
+        pumpMainLoop(5);
+        testAssert(splitView.getActivePane() == splitView.getRightPane(), "cycleFocus() switches active pane again to right");
+        focused = root ? gtk_root_get_focus(root) : nullptr;
+        rightHasFocus = focused && (focused == splitView.getRightPane()->getWidget() ||
+                                    gtk_widget_is_ancestor(focused, splitView.getRightPane()->getWidget()));
+        testAssert(rightHasFocus, "cycleFocus() routes keyboard focus again to right pane via grabFocus()");
+
+        // Call toggleSplit() again: assert isSplit() == false and active pane resets to left
+        splitView.toggleSplit();
+        testAssert(splitView.isSplit() == false, "toggleSplit() again sets isSplit() == false");
+        testAssert(splitView.getActivePane() == splitView.getLeftPane(), "active pane resets to left upon closing split");
+        testAssert(gtk_widget_get_visible(splitView.getRightPane()->getWidget()) == FALSE,
+                   "Right pane is hidden after closing split");
+
+        // Clean up test window cleanly
+        gtk_window_set_child(GTK_WINDOW(testWin), nullptr);
+        gtk_window_destroy(GTK_WINDOW(testWin));
+        pumpMainLoop(5);
+        g_object_unref(splitView.getWidget());
+    }
+    std::cout << std::endl;
+
+    // -------------------------------------------------------------
+    // Test Section 10 (Phase 2 Suite 5): Full Window Integration
+    // -------------------------------------------------------------
+    std::cout << "--- Test Section 10: Full Window Integration (SplitView & Navigation) ---\n";
+    {
+        dfiles::core::DFilesApp app("org.gnome.dfiles.test.p2integration");
+        app.setTestMode(true);
+        app.onStartup();
+        app.onActivate();
+
+        auto* window = app.getWindow();
+        testAssert(window != nullptr, "DFilesWindow instantiated on onActivate");
+        if (window) {
+            auto* splitView = window->getSplitView();
+            testAssert(splitView != nullptr, "SplitView is present in DFilesWindow");
+            testAssert(splitView->getWidget() != nullptr, "SplitView getWidget() non-null");
+
+            // In headless DFilesWindow: assert SplitView is present in content area
+            testAssert(window->getContentArea() != nullptr, "DFilesWindow getContentArea() non-null");
+            testAssert(gtk_widget_get_parent(splitView->getWidget()) == window->getContentArea(),
+                       "SplitView widget is child of DFilesWindow contentArea");
+
+            // Test win.toggle-split action toggles SplitView
+            auto* winActionGroup = G_ACTION_GROUP(window->getWindow());
+            bool splitBefore = splitView->isSplit();
+            g_action_group_activate_action(winActionGroup, "toggle-split", nullptr);
+            testAssert(splitView->isSplit() == !splitBefore, "Action win.toggle-split toggles SplitView isSplit()");
+            testAssert(window->getHeaderBar()->isSplitActive() == splitView->isSplit(),
+                       "HeaderBar split button is synchronized with SplitView");
+
+            g_action_group_activate_action(winActionGroup, "toggle-split", nullptr);
+            testAssert(splitView->isSplit() == splitBefore, "Action win.toggle-split restores original state");
+            testAssert(window->getHeaderBar()->isSplitActive() == splitView->isSplit(),
+                       "HeaderBar split button restored");
+
+            // Test sidebar place selection navigates active pane
+            auto* sidebar = window->getSidebar();
+            auto* activePane = splitView->getActivePane();
+            testAssert(sidebar != nullptr && activePane != nullptr, "Sidebar and active pane non-null");
+            if (sidebar && sidebar->onPlaceSelected && activePane) {
+                g_autoptr(GFile) rootDir = g_file_new_for_path("/");
+                sidebar->onPlaceSelected("file:///");
+                pumpMainLoop(15);
+                testAssert(activePane->getCurrentDirectory() != nullptr && g_file_equal(activePane->getCurrentDirectory(), rootDir),
+                           "PlacesSidebar selection navigates active pane to 'file:///'");
+            }
+        }
     }
     std::cout << std::endl;
 
