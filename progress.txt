@@ -19,4 +19,75 @@
   * GSD Suite: Phased wave parallelization, workstreams, and UI audits
   * Adversarial Council: Milestone governance, red-team stress testing, and High Court consensus
   * REA MCP: Native reverse engineering of Nautilus and Dolphin binary capabilities
-- Status: Fully prepared. No code written. Awaiting user review before spawning multi-agent system.
+- Status: Phase 1 In Progress.
+
+[2026-11-12] Phase 1 - worker-core: Core types, DFilesApp, and main entry point implemented:
+- Implemented `src/core/types.hpp`: ViewMode, SortColumn, SortOrder enums with constexpr string serialization helpers.
+- Implemented `src/core/app.hpp` and `src/core/app.cpp`:
+  * `DFilesApp` encapsulating `AdwApplication*` ("org.gnome.dfiles", G_APPLICATION_HANDLES_OPEN).
+  * Command line option parsing with `--version` and `--test-mode`.
+  * Clean RAII destructor with `g_clear_object(&m_app)`.
+  * Global GActions: `app.quit` (<Ctrl>q, <Ctrl>w), `app.preferences` (<Ctrl>comma), `app.about`.
+  * Window action bindings: `win.toggle-split` (F3), `win.toggle-terminal` (F4), `win.toggle-inspector` (F11), `win.focus-pathbar` (<Control>l), `win.focus-filter` (<Control>i).
+  * Window lifecycle management: `onStartup`, `onActivate`, `onOpen` instantiating and presenting `DFilesWindow`.
+  * Flag `bool isTestMode() const` and setter `setTestMode(bool)`.
+- Implemented `src/main.cpp`: Entry point instantiating `DFilesApp` and delegating to `app.run(argc, argv)`.
+- Verification: Clean compilation with `ninja -C build`, standalone verification test suite passed, `--version` and `--help` CLI flags validated.
+
+[2026-11-13] Phase 1 - worker-hardening: Code audit, defensive guards, and leak-free GObject lifecycle:
+- GObject Reference & Signal Safety:
+  * In PlacesSidebar: Explicitly disconnected all GVolumeMonitor signals (`mount-added`, `mount-removed`, `mount-changed`, `mount-pre-unmount`, `volume-added`, `volume-removed`, `volume-changed`, `drive-connected`, `drive-disconnected`, `drive-changed`) and listbox `row-activated` signal; unreferenced `m_volumeMonitor` via `g_clear_object`; removed pending idle refresh sources in destructor.
+  * In DFilesWindow: Resolved `AdwToast` reference leak by wrapping new toasts in `g_autoptr(AdwToast)`; tracked `GtkEventControllerKey` with explicit signal disconnection, widget detachment, and `g_clear_object`; attached `g_object_add_weak_pointer` / `g_object_remove_weak_pointer` to `m_window` to eliminate dangling pointers and use-after-free; cleared lambda callbacks on destruction.
+  * In DFilesHeaderBar: Stored signal IDs for toggle buttons (`m_splitToggledId`, `m_terminalToggledId`, `m_inspectorToggledId`) and disconnected all handlers in destructor; converted `GMenu` creation to use `g_autoptr(GMenu)`.
+  * In DFilesApp: Stored and disconnected `GApplication` lifecycle signals; managed all `GSimpleAction` handles via `g_autoptr(GSimpleAction)`; added active window fallback to `m_window->getWindow()`.
+- Defensive Null Guards:
+  * Handled NULL/invalid `$HOME` and XDG special directories (`Desktop`, `Documents`, `Downloads`, `Music`, `Pictures`, `Videos`); verified directory existence via `g_file_test`; suppressed duplicate entries when Desktop points to `$HOME`.
+  * Captured `g_filename_to_uri` conversion errors with `GError**` checking and validated output URIs using `g_uri_is_valid`.
+  * Handled NULL `GMount` and `GVolume` names/icons with fallback chains (mount symbolic -> mount icon -> volume symbolic -> volume icon -> generic fallback) and default strings.
+  * Added discovery of unmounted volumes with valid activation roots via `g_volume_monitor_get_volumes`.
+- Thread Safety:
+  * Guarded `PlacesSidebar::refreshMounts()` and `DFilesWindow::showToast()` with `g_main_context_is_owner(g_main_context_default())` checks; off-thread invocations marshal safely to GTK main context via `g_idle_add` with cancellation tokens and payload deallocation.
+- Compiler Cleanliness:
+  * Verified 0 warnings with GCC 15.2.0 under `-Wall -Wextra -Wpedantic -Werror`.
+
+[2026-11-13] Phase 1 - tester-functional: Comprehensive Functional Test Suite & Evidence Logging:
+- Implemented comprehensive functional test suite in `tests/test_functional.cpp`:
+  * Core types serialization: `ViewMode`, `SortColumn`, `SortOrder` string conversions.
+  * GActions verification: Lookups for `app.quit`, `app.preferences`, `app.about`.
+  * Window accelerators verification: Lookups for `<Control>q`, `<Control>w`, `<Control>comma`, `F3`, `F4`, `F11`, `<Control>l`, `<Control>i`.
+  * HeaderBar toggles & signals: States and signal callback invocation for Split View, Terminal drawer, Inspector sidebar, and AdwWindowTitle.
+  * PlacesSidebar population: Home, Root (`file:///`), Trash (`trash:///`), XDG special dirs, Drives section header, `selectPlaceByUri` hit/miss, and `onPlaceSelected` activation callback.
+  * Headless DFilesWindow instantiation & presentation: Layout containers, toast notifications, preferences & about dialog presentation.
+- CLI Flags verified:
+  * `--version`: Correctly outputs `dfiles 0.1.0` and exits 0.
+  * `--help`: Displays full option synopsis with `--test-mode` and `--version`.
+  * `--test-mode`: Headless activation with clean presentation and automated graceful quit on idle under `xvfb-run -a`.
+- Meson & Ninja test harness:
+  * Integrated `test_functional` executable and `test('functional', ...)` target into `meson.build`.
+  * Clean compilation verified under `-Wall -Wextra -Wpedantic -Werror`.
+  * Executed via `xvfb-run -a meson test -C build --verbose` with 100% pass rate (57/57 tests passed, 0 failures, 0 criticals).
+- Evidence captured to `.council/dfiles_phase1/round_1/evidence/test_functional.log`.
+
+[2026-11-13] Phase 1 - tester-adversarial: Chaos, Stress, Hostile Environment & ASan Verification:
+- Implemented adversarial stress test suite in `tests/adversarial_stress.cpp` and test runner `scripts/run_all_adversarial_tests.sh`:
+  * Vector 1: Hostile Environment Injection (13 scenarios):
+    - Missing $HOME (`HOME=""`), Unset $HOME, Nonexistent $HOME, and Inaccessible `/root` $HOME handled cleanly with 0 crashes.
+    - Missing Display (`DISPLAY="" WAYLAND_DISPLAY=""`) and Invalid Display sockets properly handled with clean exit code 1 and GTK warnings.
+    - Malformed CLI flags (`--invalid-arg-xyz`, `-z`, `--version --bogus`, 64KB long flag buffer overflow, non-UTF8 byte injection, null strings) rejected with exit code 1 and 0 crashes.
+  * Vector 2: Rapid Action/Toggle Stress (10 test suites, 1800+ total events):
+    - Hammered F3 (Split View), F4 (Terminal Drawer), F11 (Inspector Sidebar) 300+ times individually and 900+ times in chaotic interleaved sequences.
+    - Synthesized 300+ key events through `GtkEventControllerKey`.
+    - Multi-threaded toast storm: 4 concurrent threads emitting 400 toasts into `DFilesWindow::showToast` concurrently with main loop pumping.
+    - High-frequency window lifecycle churn: 50 rapid `DFilesWindow` creations and immediate destructions under event load.
+    - PlacesSidebar mount storm: 500 rapid `scheduleRefreshMounts` and URI fuzzing.
+    - Extreme string fuzzing: 128KB strings, format string injection (`%s%s%n%x`), and hostile URIs.
+  * Vector 3: Memory Safety & AddressSanitizer (ASan / UBSan):
+    - Compiled dedicated ASan build (`build-asan`) with `-Db_sanitize=address,undefined`.
+    - Executed all hostile environment injections and 1800+ toggle stress tests under ASan/UBSan with 0 memory errors, 0 use-after-free, and 0 buffer overflows.
+- Vulnerability Audit & Fix:
+  * Uncovered critical double-unref / use-after-free bug in `DFilesWindow::showToast` where `adw_toast_overlay_add_toast` was mistakenly assumed to not take ownership (transfer full); resolved using `g_steal_pointer(&toast)`.
+  * Resolved D-Bus GApplication multi-instance registration collision in `tests/test_functional.cpp`.
+- Captured full execution logs to `.council/dfiles_phase1/round_1/evidence/test_adversarial.log`.
+
+
+

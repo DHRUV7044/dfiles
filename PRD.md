@@ -120,10 +120,10 @@ dfiles/
 ## 6. Completion Promise & Actionable Tasks
 
 ### Milestone 1: Core Architecture & Build Foundation
-- [ ] Task 1.1: Setup Meson build system with C++20, GTK4, Libadwaita-1, and VTE GTK4 dependencies.
-- [ ] Task 1.2: Implement `DFilesApp` and main application lifecycle with Libadwaita theming.
-- [ ] Task 1.3: Build `DFilesWindow` containing `AdwToolbarView`, `AdwHeaderBar`, and `AdwToastOverlay`.
-- [ ] Task 1.4: Implement modern Places Sidebar with XDG locations, root, trash, and drive monitor.
+- [x] Task 1.1: Setup Meson build system with C++20, GTK4, Libadwaita-1, and VTE GTK4 dependencies.
+- [x] Task 1.2: Implement `DFilesApp` and main application lifecycle with Libadwaita theming.
+- [x] Task 1.3: Build `DFilesWindow` containing `AdwToolbarView`, `AdwHeaderBar`, and `AdwToastOverlay`.
+- [x] Task 1.4: Implement modern Places Sidebar with XDG locations, root, trash, and drive monitor.
 
 ### Milestone 2: File Browser & Dual-Pane Engine (`F3`)
 - [ ] Task 2.1: Implement `FileItem` model wrapping `GFileInfo` with sorting, icons, and metadata.
