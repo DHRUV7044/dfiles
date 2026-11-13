@@ -121,11 +121,11 @@ void SplitView::setupUI() {
 
     gtk_paned_set_start_child(GTK_PANED(m_paned), m_leftPane->getWidget());
     gtk_paned_set_resize_start_child(GTK_PANED(m_paned), TRUE);
-    gtk_paned_set_shrink_start_child(GTK_PANED(m_paned), FALSE);
+    gtk_paned_set_shrink_start_child(GTK_PANED(m_paned), TRUE);
 
     gtk_paned_set_end_child(GTK_PANED(m_paned), m_rightPane->getWidget());
     gtk_paned_set_resize_end_child(GTK_PANED(m_paned), TRUE);
-    gtk_paned_set_shrink_end_child(GTK_PANED(m_paned), FALSE);
+    gtk_paned_set_shrink_end_child(GTK_PANED(m_paned), TRUE);
 
     // Initially secondary pane is hidden
     m_isSplit = false;

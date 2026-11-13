@@ -6,8 +6,10 @@
 #include "ui/sidebar.hpp"
 #include "ui/window.hpp"
 #include "views/file_view.hpp"
-#include "views/pane_view.hpp"
 #include "views/split_view.hpp"
+#include "inspector/checksum_helper.hpp"
+#include "inspector/inspector_sidebar.hpp"
+#include "terminal/terminal_drawer.hpp"
 
 #include <adwaita.h>
 #include <algorithm>
@@ -809,7 +811,7 @@ int main(int /*argc*/, char* /*argv*/[]) {
 
             // In headless DFilesWindow: assert SplitView is present in content area
             testAssert(window->getContentArea() != nullptr, "DFilesWindow getContentArea() non-null");
-            testAssert(gtk_widget_get_parent(splitView->getWidget()) == window->getContentArea(),
+            testAssert(gtk_widget_is_ancestor(splitView->getWidget(), window->getContentArea()),
                        "SplitView widget is child of DFilesWindow contentArea");
 
             // Test win.toggle-split action toggles SplitView
@@ -835,6 +837,203 @@ int main(int /*argc*/, char* /*argv*/[]) {
                 pumpMainLoop(15);
                 testAssert(activePane->getCurrentDirectory() != nullptr && g_file_equal(activePane->getCurrentDirectory(), rootDir),
                            "PlacesSidebar selection navigates active pane to 'file:///'");
+            }
+        }
+    }
+    std::cout << std::endl;
+
+    // -------------------------------------------------------------
+    // Test Section 11: Milestone 3 Terminal Drawer & Inspector Sidebar Integration
+    // -------------------------------------------------------------
+    std::cout << "--- Test Section 11: Milestone 3 Terminal Drawer & Inspector Sidebar ---\n";
+    {
+        dfiles::core::DFilesApp app("org.gnome.dfiles.test.p3integration");
+        app.setTestMode(true);
+        app.onStartup();
+        app.onActivate();
+
+        auto* window = app.getWindow();
+        testAssert(window != nullptr, "DFilesWindow instantiated on onActivate");
+        if (window) {
+            auto* drawer = window->getTerminalDrawer();
+            auto* inspector = window->getInspectorSidebar();
+            auto* hb = window->getHeaderBar();
+
+            testAssert(drawer != nullptr, "TerminalDrawer is present in DFilesWindow");
+            testAssert(inspector != nullptr, "InspectorSidebar is present in DFilesWindow");
+            testAssert(drawer->getWidget() != nullptr, "TerminalDrawer root widget non-null");
+            testAssert(inspector->getWidget() != nullptr, "InspectorSidebar root widget non-null");
+
+            // Initial visibility verification
+            testAssert(!drawer->isVisible(), "TerminalDrawer initially hidden");
+            testAssert(!inspector->isVisible(), "InspectorSidebar initially hidden");
+            testAssert(!hb->isTerminalActive(), "HeaderBar terminal toggle initially inactive");
+            testAssert(!hb->isInspectorActive(), "HeaderBar inspector toggle initially inactive");
+
+            auto* winActionGroup = G_ACTION_GROUP(window->getWindow());
+
+            // 1. win.toggle-terminal action
+            g_action_group_activate_action(winActionGroup, "toggle-terminal", nullptr);
+            testAssert(drawer->isVisible(), "Action win.toggle-terminal opens drawer");
+            testAssert(hb->isTerminalActive(), "HeaderBar terminal button active after action");
+
+            g_action_group_activate_action(winActionGroup, "toggle-terminal", nullptr);
+            testAssert(!drawer->isVisible(), "Action win.toggle-terminal closes drawer");
+            testAssert(!hb->isTerminalActive(), "HeaderBar terminal button inactive after action");
+
+            // 2. win.toggle-inspector action
+            g_action_group_activate_action(winActionGroup, "toggle-inspector", nullptr);
+            testAssert(inspector->isVisible(), "Action win.toggle-inspector opens sidebar");
+            testAssert(hb->isInspectorActive(), "HeaderBar inspector button active after action");
+
+            g_action_group_activate_action(winActionGroup, "toggle-inspector", nullptr);
+            testAssert(!inspector->isVisible(), "Action win.toggle-inspector closes sidebar");
+            testAssert(!hb->isInspectorActive(), "HeaderBar inspector button inactive after action");
+
+            // 3. Inspector onClosed callback
+            hb->setInspectorActive(true);
+            if (hb->onInspectorToggled) hb->onInspectorToggled();
+            testAssert(inspector->isVisible(), "Inspector opened via headerbar");
+            if (inspector->onClosed) {
+                inspector->onClosed();
+            }
+            testAssert(!hb->isInspectorActive(), "Inspector onClosed deactivates headerbar button");
+
+            // 4. File inspection
+            inspector->inspectItems({}); // Empty selection
+            testAssert(true, "Inspector inspectItems({}) executes cleanly");
+
+            namespace fs = std::filesystem;
+            fs::path testFile = fs::temp_directory_path() / "dfiles_test_inspect.txt";
+            {
+                std::ofstream ofs(testFile);
+                ofs << "dfiles inspection test content\n";
+            }
+            g_autoptr(GFile) gfile = g_file_new_for_path(testFile.c_str());
+            g_autoptr(GFileInfo) info = g_file_query_info(gfile, "*", G_FILE_QUERY_INFO_NONE, nullptr, nullptr);
+            if (info) {
+                dfiles::model::FileItem singleItem(gfile, info);
+                std::vector<dfiles::model::FileItem> items{singleItem};
+                inspector->inspectItems(items);
+                testAssert(true, "Inspector inspectItems with single file executes cleanly");
+
+                items.push_back(singleItem);
+                inspector->inspectItems(items);
+                testAssert(true, "Inspector inspectItems with multiple files executes cleanly");
+            }
+            fs::remove(testFile);
+
+            // 5. ChecksumHelper async computation & cancellation
+            {
+                dfiles::inspector::ChecksumHelper checksumHelper;
+                fs::path chkFile = fs::temp_directory_path() / "dfiles_chk_test.txt";
+                {
+                    std::ofstream ofs(chkFile);
+                    ofs << "1234567890";
+                }
+                g_autoptr(GFile) chkGFile = g_file_new_for_path(chkFile.c_str());
+                bool checksumDone = false;
+                std::string md5Result;
+                std::string sha256Result;
+
+                checksumHelper.computeAsync(chkGFile, [&](const dfiles::inspector::ChecksumResult& res) {
+                    checksumDone = true;
+                    if (res.success) {
+                        md5Result = res.md5;
+                        sha256Result = res.sha256;
+                    }
+                });
+
+                int loops = 0;
+                while (!checksumDone && loops++ < 50) {
+                    pumpMainLoop(2);
+                }
+
+                testAssert(checksumDone, "ChecksumHelper computeAsync completed");
+                testAssert(md5Result == "e807f1fcf82d132f9bb018ca6738a19f", "MD5 checksum matches expected hash");
+                testAssert(sha256Result == "c775e7b757ede630cd0aa1113bd102661ab38829ca52a6422ab782862f268646", "SHA-256 checksum matches expected hash");
+                fs::remove(chkFile);
+
+                // Compute known test vector for 'hello dfiles\n'
+                fs::path helloFile = fs::temp_directory_path() / "dfiles_hello_hash.txt";
+                {
+                    std::ofstream ofs(helloFile);
+                    ofs << "hello dfiles\n";
+                }
+                g_autoptr(GFile) helloGFile = g_file_new_for_path(helloFile.c_str());
+                bool helloDone = false;
+                std::string helloMd5;
+                std::string helloSha256;
+                checksumHelper.computeAsync(helloGFile, [&](const dfiles::inspector::ChecksumResult& res) {
+                    helloDone = true;
+                    if (res.success) {
+                        helloMd5 = res.md5;
+                        helloSha256 = res.sha256;
+                    }
+                });
+                loops = 0;
+                while (!helloDone && loops++ < 50) {
+                    pumpMainLoop(2);
+                }
+                testAssert(helloDone, "ChecksumHelper computeAsync for 'hello dfiles\\n' completed");
+                testAssert(helloMd5 == "ad9e9644531b652cb2c99c19b217eb1e", "MD5 of 'hello dfiles\\n' matches ad9e9644531b652cb2c99c19b217eb1e");
+                testAssert(helloSha256 == "a9253384401f511521654f53ee59fb3e44d55eecc6eaf4ef5c477f8556e183b0", "SHA-256 of 'hello dfiles\\n' matches a9253384401f511521654f53ee59fb3e44d55eecc6eaf4ef5c477f8556e183b0");
+                fs::remove(helloFile);
+
+                // Verify cancel() halts in-flight hashing cleanly without crash
+                fs::path cancelFile = fs::temp_directory_path() / "dfiles_cancel_test.txt";
+                {
+                    std::ofstream ofs(cancelFile);
+                    for (int i = 0; i < 2000; ++i) ofs << "cancelling in flight hashing line\n";
+                }
+                g_autoptr(GFile) cGFile = g_file_new_for_path(cancelFile.c_str());
+                checksumHelper.computeAsync(cGFile, [](const dfiles::inspector::ChecksumResult&) {});
+                checksumHelper.cancel();
+                pumpMainLoop(5);
+                testAssert(!checksumHelper.isRunning(), "ChecksumHelper isRunning() is false after cancel()");
+                fs::remove(cancelFile);
+            }
+
+            // 6. Terminal bidirectional directory navigation and direct controls
+            drawer->setVisible(true);
+            testAssert(drawer->isVisible(), "Terminal drawer setVisible(true)");
+            drawer->toggleVisibility();
+            testAssert(!drawer->isVisible(), "Terminal drawer toggleVisibility() hides drawer");
+            drawer->toggleVisibility();
+            testAssert(drawer->isVisible(), "Terminal drawer toggleVisibility() shows drawer");
+
+            // Verify onClosed deactivates headerbar button and updates state (REMED-1)
+            hb->setTerminalActive(true);
+            testAssert(hb->isTerminalActive(), "HeaderBar terminal active before onClosed");
+            if (drawer->onClosed) {
+                drawer->onClosed();
+                testAssert(!hb->isTerminalActive(), "Terminal drawer onClosed deactivates headerbar button");
+            }
+
+            // Verify restartShell execution (REMED-3)
+            drawer->restartShell();
+            testAssert(true, "TerminalDrawer restartShell() executed cleanly");
+
+            // Verify syncDirectory execution with valid directory and nullptr guard
+            g_autoptr(GFile) tmpDir = g_file_new_for_path("/tmp");
+            drawer->syncDirectory(tmpDir);
+            testAssert(true, "TerminalDrawer syncDirectory(/tmp) executed cleanly");
+            drawer->syncDirectory(nullptr);
+            testAssert(true, "TerminalDrawer syncDirectory(nullptr) guarded defensively");
+
+            drawer->setVisible(true);
+            if (drawer->onShellDirectoryChanged) {
+                drawer->onShellDirectoryChanged("file:///tmp");
+                pumpMainLoop(10);
+                auto* activePane = window->getSplitView()->getActivePane();
+                testAssert(activePane != nullptr && activePane->getCurrentDirectory() != nullptr,
+                           "Active pane non-null after shell directory change");
+                if (activePane && activePane->getCurrentDirectory()) {
+                    g_autofree char* path = g_file_get_parse_name(activePane->getCurrentDirectory());
+                    testAssert(path && std::string(path) == "/tmp",
+                               "Shell directory change OSC 7 navigated active pane to /tmp",
+                               path ? path : "null");
+                }
             }
         }
     }

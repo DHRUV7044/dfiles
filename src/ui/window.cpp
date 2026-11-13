@@ -1,5 +1,6 @@
 #include "ui/window.hpp"
 #include <algorithm>
+#include <cstring>
 #include <gdk/gdkkeysyms.h>
 
 namespace dfiles::ui {
@@ -31,13 +32,21 @@ DFilesWindow::~DFilesWindow() {
     if (m_sidebar) {
         m_sidebar->onPlaceSelected = nullptr;
     }
+    if (m_terminalDrawer) {
+        m_terminalDrawer->onShellDirectoryChanged = nullptr;
+    }
+    if (m_inspectorSidebar) {
+        m_inspectorSidebar->onClosed = nullptr;
+    }
     if (m_splitView) {
         m_splitView->onActivePaneChanged = nullptr;
         if (m_splitView->getLeftPane()) {
             m_splitView->getLeftPane()->onDirectoryChanged = nullptr;
+            m_splitView->getLeftPane()->onSelectionChanged = nullptr;
         }
         if (m_splitView->getRightPane()) {
             m_splitView->getRightPane()->onDirectoryChanged = nullptr;
+            m_splitView->getRightPane()->onSelectionChanged = nullptr;
         }
     }
 
@@ -58,6 +67,8 @@ DFilesWindow::~DFilesWindow() {
     }
 
     // 4. Reset encapsulated sub-components while native widgets are still valid
+    m_terminalDrawer.reset();
+    m_inspectorSidebar.reset();
     m_splitView.reset();
     m_sidebar.reset();
     m_headerBar.reset();
@@ -160,6 +171,14 @@ views::SplitView* DFilesWindow::getSplitView() const noexcept {
     return m_splitView.get();
 }
 
+terminal::TerminalDrawer* DFilesWindow::getTerminalDrawer() const noexcept {
+    return m_terminalDrawer.get();
+}
+
+inspector::InspectorSidebar* DFilesWindow::getInspectorSidebar() const noexcept {
+    return m_inspectorSidebar.get();
+}
+
 GtkWidget* DFilesWindow::getContentArea() const {
     return m_contentArea;
 }
@@ -179,6 +198,9 @@ void DFilesWindow::setupUI(AdwApplication* app) {
     // 2. Encapsulated sub-components
     m_headerBar = std::make_unique<DFilesHeaderBar>();
     m_sidebar = std::make_unique<PlacesSidebar>();
+    m_splitView = std::make_unique<views::SplitView>();
+    m_terminalDrawer = std::make_unique<terminal::TerminalDrawer>();
+    m_inspectorSidebar = std::make_unique<inspector::InspectorSidebar>();
 
     // 3. AdwToolbarView layout container
     m_toolbarView = adw_toolbar_view_new();
@@ -188,7 +210,39 @@ void DFilesWindow::setupUI(AdwApplication* app) {
     m_toastOverlay = adw_toast_overlay_new();
     adw_toolbar_view_set_content(ADW_TOOLBAR_VIEW(m_toolbarView), m_toastOverlay);
 
-    // 5. Horizontal GtkPaned (Sidebar on left, main content on right)
+    // 5. Workspace paned: SplitView on left, InspectorSidebar on right
+    m_workspaceHorizontalPaned = gtk_paned_new(GTK_ORIENTATION_HORIZONTAL);
+    gtk_widget_set_hexpand(m_workspaceHorizontalPaned, TRUE);
+    gtk_widget_set_vexpand(m_workspaceHorizontalPaned, TRUE);
+
+    gtk_paned_set_start_child(GTK_PANED(m_workspaceHorizontalPaned), m_splitView->getWidget());
+    gtk_paned_set_resize_start_child(GTK_PANED(m_workspaceHorizontalPaned), TRUE);
+    gtk_paned_set_shrink_start_child(GTK_PANED(m_workspaceHorizontalPaned), FALSE);
+
+    gtk_paned_set_end_child(GTK_PANED(m_workspaceHorizontalPaned), m_inspectorSidebar->getWidget());
+    gtk_paned_set_resize_end_child(GTK_PANED(m_workspaceHorizontalPaned), FALSE);
+    gtk_paned_set_shrink_end_child(GTK_PANED(m_workspaceHorizontalPaned), TRUE);
+
+    // 6. Content vertical paned: Workspace on top, TerminalDrawer on bottom
+    m_contentVerticalPaned = gtk_paned_new(GTK_ORIENTATION_VERTICAL);
+    gtk_widget_set_hexpand(m_contentVerticalPaned, TRUE);
+    gtk_widget_set_vexpand(m_contentVerticalPaned, TRUE);
+
+    gtk_paned_set_start_child(GTK_PANED(m_contentVerticalPaned), m_workspaceHorizontalPaned);
+    gtk_paned_set_resize_start_child(GTK_PANED(m_contentVerticalPaned), TRUE);
+    gtk_paned_set_shrink_start_child(GTK_PANED(m_contentVerticalPaned), FALSE);
+
+    gtk_paned_set_end_child(GTK_PANED(m_contentVerticalPaned), m_terminalDrawer->getWidget());
+    gtk_paned_set_resize_end_child(GTK_PANED(m_contentVerticalPaned), FALSE);
+    gtk_paned_set_shrink_end_child(GTK_PANED(m_contentVerticalPaned), FALSE);
+
+    // 7. Right content container hosting the paned layout
+    m_contentArea = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_widget_set_hexpand(m_contentArea, TRUE);
+    gtk_widget_set_vexpand(m_contentArea, TRUE);
+    gtk_box_append(GTK_BOX(m_contentArea), m_contentVerticalPaned);
+
+    // 8. Horizontal GtkPaned (PlacesSidebar on left, main content on right)
     m_mainPaned = gtk_paned_new(GTK_ORIENTATION_HORIZONTAL);
     gtk_paned_set_position(GTK_PANED(m_mainPaned), 220);
 
@@ -197,15 +251,7 @@ void DFilesWindow::setupUI(AdwApplication* app) {
     gtk_paned_set_resize_start_child(GTK_PANED(m_mainPaned), FALSE);
     gtk_paned_set_shrink_start_child(GTK_PANED(m_mainPaned), FALSE);
 
-    // Right pane: Content container hosting SplitView
-    m_contentArea = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-    gtk_widget_set_hexpand(m_contentArea, TRUE);
-    gtk_widget_set_vexpand(m_contentArea, TRUE);
-
-    // Phase 2: Host SplitView inside content area
-    m_splitView = std::make_unique<views::SplitView>();
-    gtk_box_append(GTK_BOX(m_contentArea), m_splitView->getWidget());
-
+    // Right pane: Content container
     gtk_paned_set_end_child(GTK_PANED(m_mainPaned), m_contentArea);
     gtk_paned_set_resize_end_child(GTK_PANED(m_mainPaned), TRUE);
     gtk_paned_set_shrink_end_child(GTK_PANED(m_mainPaned), FALSE);
@@ -243,23 +289,119 @@ void DFilesWindow::setupSignals() {
     if (m_splitView) {
         m_splitView->onActivePaneChanged = [this, updateHeaderForPane](views::PaneView* activePane) {
             updateHeaderForPane(activePane);
+            if (activePane) {
+                if (m_terminalDrawer && m_terminalDrawer->isVisible() && activePane->getCurrentDirectory() && !m_syncingFromTerminal) {
+                    m_terminalDrawer->syncDirectory(activePane->getCurrentDirectory());
+                }
+                if (m_inspectorSidebar && m_inspectorSidebar->isVisible()) {
+                    m_inspectorSidebar->inspectItems(activePane->getSelectedItems());
+                }
+            }
         };
 
-        if (m_splitView->getLeftPane()) {
-            m_splitView->getLeftPane()->onDirectoryChanged = [this, updateHeaderForPane](GFile*) {
-                if (m_splitView->getActivePane() == m_splitView->getLeftPane()) {
-                    updateHeaderForPane(m_splitView->getLeftPane());
+        auto wirePaneEvents = [this, updateHeaderForPane](views::PaneView* pane) {
+            if (!pane) {
+                return;
+            }
+            pane->onDirectoryChanged = [this, pane, updateHeaderForPane](GFile* dir) {
+                if (m_splitView && m_splitView->getActivePane() == pane) {
+                    updateHeaderForPane(pane);
+                    if (!m_syncingFromTerminal && m_terminalDrawer && m_terminalDrawer->isVisible() && dir) {
+                        m_terminalDrawer->syncDirectory(dir);
+                    }
                 }
             };
-        }
+            pane->onSelectionChanged = [this, pane](const std::vector<model::FileItem>& items) {
+                if (m_splitView && m_splitView->getActivePane() == pane) {
+                    if (m_inspectorSidebar && m_inspectorSidebar->isVisible()) {
+                        m_inspectorSidebar->inspectItems(items);
+                    }
+                }
+            };
+        };
 
-        if (m_splitView->getRightPane()) {
-            m_splitView->getRightPane()->onDirectoryChanged = [this, updateHeaderForPane](GFile*) {
-                if (m_splitView->getActivePane() == m_splitView->getRightPane()) {
-                    updateHeaderForPane(m_splitView->getRightPane());
+        wirePaneEvents(m_splitView->getLeftPane());
+        wirePaneEvents(m_splitView->getRightPane());
+    }
+
+    if (m_terminalDrawer) {
+        m_terminalDrawer->onClosed = [this]() {
+            if (m_headerBar && m_headerBar->isTerminalActive()) {
+                m_headerBar->setTerminalActive(false);
+            }
+            if (m_window) {
+                if (auto* act = g_action_map_lookup_action(G_ACTION_MAP(m_window), "toggle-terminal")) {
+                    g_action_change_state(act, g_variant_new_boolean(FALSE));
                 }
-            };
-        }
+            }
+            showToast("Terminal drawer closed (F4)");
+        };
+
+        m_terminalDrawer->onShellDirectoryChanged = [this](const std::string& uri) {
+            if (uri.empty() || uri.size() > 4096 || !m_splitView || !m_terminalDrawer || !m_terminalDrawer->isVisible()) {
+                return;
+            }
+            if (!g_str_has_prefix(uri.c_str(), "file://")) {
+                return;
+            }
+
+            g_autofree char* hostname = nullptr;
+            GError* convErr = nullptr;
+            g_autofree char* localPath = g_filename_from_uri(uri.c_str(), &hostname, &convErr);
+            if (convErr) {
+                g_error_free(convErr);
+                return;
+            }
+            if (hostname && *hostname && std::strcmp(hostname, "localhost") != 0) {
+                return;
+            }
+            if (!localPath || !g_utf8_validate(localPath, -1, nullptr)) {
+                return;
+            }
+            if (!g_file_test(localPath, G_FILE_TEST_IS_DIR)) {
+                return;
+            }
+
+            views::PaneView* activePane = m_splitView->getActivePane();
+            if (!activePane) {
+                return;
+            }
+
+            g_autoptr(GFile) target = g_file_new_for_path(localPath);
+            if (!target) {
+                return;
+            }
+
+            GFile* currentDir = activePane->getCurrentDirectory();
+            if (currentDir && g_file_equal(currentDir, target)) {
+                return;
+            }
+
+            struct SyncGuard {
+                bool& flag;
+                explicit SyncGuard(bool& f) : flag(f) { flag = true; }
+                ~SyncGuard() { flag = false; }
+            } guard(m_syncingFromTerminal);
+
+            activePane->navigateTo(target);
+        };
+    }
+
+    if (m_inspectorSidebar) {
+        m_inspectorSidebar->onClosed = [this]() {
+            if (m_headerBar && m_headerBar->isInspectorActive()) {
+                m_headerBar->setInspectorActive(false);
+            }
+            if (m_window) {
+                if (auto* act = g_action_map_lookup_action(G_ACTION_MAP(m_window), "toggle-inspector")) {
+                    g_autoptr(GVariant) state = g_action_get_state(act);
+                    if (state && g_variant_get_boolean(state)) {
+                        g_simple_action_set_state(G_SIMPLE_ACTION(act), g_variant_new_boolean(FALSE));
+                    }
+                }
+            }
+            showToast("Inspector sidebar closed (F11)");
+        };
     }
 
     if (m_headerBar) {
@@ -284,30 +426,43 @@ void DFilesWindow::setupSignals() {
         };
 
         m_headerBar->onTerminalToggled = [this]() {
-            if (m_headerBar) {
-                const bool active = m_headerBar->isTerminalActive();
-                showToast(active ? "Terminal drawer opened (F4)" : "Terminal drawer closed (F4)");
-                if (m_window) {
-                    if (auto* act = g_action_map_lookup_action(G_ACTION_MAP(m_window), "toggle-terminal")) {
-                        g_autoptr(GVariant) state = g_action_get_state(act);
-                        if (state && g_variant_get_boolean(state) != static_cast<gboolean>(active)) {
-                            g_simple_action_set_state(G_SIMPLE_ACTION(act), g_variant_new_boolean(active));
-                        }
+            const bool active = m_headerBar ? m_headerBar->isTerminalActive() : false;
+            if (m_terminalDrawer && m_terminalDrawer->isVisible() != active) {
+                m_terminalDrawer->setVisible(active);
+            }
+            if (active && m_terminalDrawer) {
+                if (m_splitView && m_splitView->getActivePane()) {
+                    m_terminalDrawer->syncDirectory(m_splitView->getActivePane()->getCurrentDirectory());
+                }
+                m_terminalDrawer->grabFocus();
+            }
+            showToast(active ? "Terminal drawer opened (F4)" : "Terminal drawer closed (F4)");
+            if (m_window) {
+                if (auto* act = g_action_map_lookup_action(G_ACTION_MAP(m_window), "toggle-terminal")) {
+                    g_autoptr(GVariant) state = g_action_get_state(act);
+                    if (state && g_variant_get_boolean(state) != static_cast<gboolean>(active)) {
+                        g_simple_action_set_state(G_SIMPLE_ACTION(act), g_variant_new_boolean(active));
                     }
                 }
             }
         };
 
         m_headerBar->onInspectorToggled = [this]() {
-            if (m_headerBar) {
-                const bool active = m_headerBar->isInspectorActive();
-                showToast(active ? "Inspector sidebar opened (F11)" : "Inspector sidebar closed (F11)");
-                if (m_window) {
-                    if (auto* act = g_action_map_lookup_action(G_ACTION_MAP(m_window), "toggle-inspector")) {
-                        g_autoptr(GVariant) state = g_action_get_state(act);
-                        if (state && g_variant_get_boolean(state) != static_cast<gboolean>(active)) {
-                            g_simple_action_set_state(G_SIMPLE_ACTION(act), g_variant_new_boolean(active));
-                        }
+            const bool active = m_headerBar ? m_headerBar->isInspectorActive() : false;
+            if (m_inspectorSidebar && m_inspectorSidebar->isVisible() != active) {
+                m_inspectorSidebar->setVisible(active);
+            }
+            if (active && m_inspectorSidebar) {
+                if (m_splitView && m_splitView->getActivePane()) {
+                    m_inspectorSidebar->inspectItems(m_splitView->getActivePane()->getSelectedItems());
+                }
+            }
+            showToast(active ? "Inspector sidebar opened (F11)" : "Inspector sidebar closed (F11)");
+            if (m_window) {
+                if (auto* act = g_action_map_lookup_action(G_ACTION_MAP(m_window), "toggle-inspector")) {
+                    g_autoptr(GVariant) state = g_action_get_state(act);
+                    if (state && g_variant_get_boolean(state) != static_cast<gboolean>(active)) {
+                        g_simple_action_set_state(G_SIMPLE_ACTION(act), g_variant_new_boolean(active));
                     }
                 }
             }
@@ -382,14 +537,22 @@ void DFilesWindow::setupActions() {
         }
         const gboolean active = g_variant_get_boolean(value);
         g_simple_action_set_state(action, value);
+
+        if (self->m_terminalDrawer && self->m_terminalDrawer->isVisible() != static_cast<bool>(active)) {
+            self->m_terminalDrawer->setVisible(active);
+        }
+        if (active && self->m_terminalDrawer) {
+            if (self->m_splitView && self->m_splitView->getActivePane()) {
+                self->m_terminalDrawer->syncDirectory(self->m_splitView->getActivePane()->getCurrentDirectory());
+            }
+            self->m_terminalDrawer->grabFocus();
+        }
         if (self->m_headerBar) {
             if (self->m_headerBar->isTerminalActive() != static_cast<bool>(active)) {
                 self->m_headerBar->setTerminalActive(active);
             }
-            if (self->m_headerBar->onTerminalToggled) {
-                self->m_headerBar->onTerminalToggled();
-            }
         }
+        self->showToast(active ? "Terminal drawer opened (F4)" : "Terminal drawer closed (F4)");
     }), this);
     g_action_map_add_action(actionMap, G_ACTION(termAction));
 
@@ -411,14 +574,21 @@ void DFilesWindow::setupActions() {
         }
         const gboolean active = g_variant_get_boolean(value);
         g_simple_action_set_state(action, value);
+
+        if (self->m_inspectorSidebar && self->m_inspectorSidebar->isVisible() != static_cast<bool>(active)) {
+            self->m_inspectorSidebar->setVisible(active);
+        }
+        if (active && self->m_inspectorSidebar) {
+            if (self->m_splitView && self->m_splitView->getActivePane()) {
+                self->m_inspectorSidebar->inspectItems(self->m_splitView->getActivePane()->getSelectedItems());
+            }
+        }
         if (self->m_headerBar) {
             if (self->m_headerBar->isInspectorActive() != static_cast<bool>(active)) {
                 self->m_headerBar->setInspectorActive(active);
             }
-            if (self->m_headerBar->onInspectorToggled) {
-                self->m_headerBar->onInspectorToggled();
-            }
         }
+        self->showToast(active ? "Inspector sidebar opened (F11)" : "Inspector sidebar closed (F11)");
     }), this);
     g_action_map_add_action(actionMap, G_ACTION(inspAction));
 

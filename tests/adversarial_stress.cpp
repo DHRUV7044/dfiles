@@ -4,6 +4,9 @@
 #include "ui/headerbar.hpp"
 #include "ui/sidebar.hpp"
 #include "ui/window.hpp"
+#include "inspector/checksum_helper.hpp"
+#include "inspector/inspector_sidebar.hpp"
+#include "terminal/terminal_drawer.hpp"
 #include "views/pane_view.hpp"
 #include "views/split_view.hpp"
 
@@ -11,7 +14,9 @@
 #include <fcntl.h>
 #include <gdk/gdkkeysyms.h>
 #include <gtk/gtk.h>
+#include <signal.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include <atomic>
@@ -950,6 +955,259 @@ int main(int /*argc*/, char* /*argv*/[]) {
         g_assert_false(splitView->isSplit());
         g_assert_true(splitView->getActivePane() == leftPane);
         pumpEvents(5);
+    });
+
+    // -------------------------------------------------------------
+    // PHASE 3 ADVERSARIAL CHAOS VECTORS
+    // -------------------------------------------------------------
+
+    // TEST 19: Vector 3.1: Rapid Toggle Storm (F4 Terminal & F11 Inspector 300+ cycles)
+    runTest("Vector 3.1: Rapid Toggle Storm (F4 Terminal & F11 Inspector 300+ cycles)", [&]() {
+        auto window = std::make_unique<dfiles::ui::DFilesWindow>(app);
+        g_assert_nonnull(window->getWidget());
+        auto* actionGroup = G_ACTION_GROUP(window->getWindow());
+        g_assert_nonnull(actionGroup);
+
+        auto* drawer = window->getTerminalDrawer();
+        auto* inspector = window->getInspectorSidebar();
+        auto* hb = window->getHeaderBar();
+        g_assert_nonnull(drawer);
+        g_assert_nonnull(inspector);
+        g_assert_nonnull(hb);
+
+        // Hammer 300 rapid toggle cycles of F4 (terminal) and F11 (inspector)
+        for (int i = 0; i < 300; ++i) {
+            g_action_group_activate_action(actionGroup, "toggle-terminal", nullptr);
+            g_action_group_activate_action(actionGroup, "toggle-inspector", nullptr);
+
+            if (i % 25 == 0) {
+                pumpEvents(2);
+            }
+        }
+
+        // 300 toggles from initial false -> even number -> final state false
+        g_assert_false(drawer->isVisible());
+        g_assert_false(inspector->isVisible());
+        g_assert_false(hb->isTerminalActive());
+        g_assert_false(hb->isInspectorActive());
+
+        // Interleaved chaotic toggle storm (toggle terminal, toggle inspector, toggle split)
+        for (int i = 0; i < 150; ++i) {
+            if (i % 2 == 0) g_action_group_activate_action(actionGroup, "toggle-terminal", nullptr);
+            if (i % 3 == 0) g_action_group_activate_action(actionGroup, "toggle-inspector", nullptr);
+            if (i % 5 == 0) g_action_group_activate_action(actionGroup, "toggle-split", nullptr);
+
+            if (i % 15 == 0) {
+                pumpEvents(1);
+            }
+        }
+
+        // Close all drawers cleanly
+        if (drawer->isVisible()) g_action_group_activate_action(actionGroup, "toggle-terminal", nullptr);
+        if (inspector->isVisible()) g_action_group_activate_action(actionGroup, "toggle-inspector", nullptr);
+        if (window->getSplitView()->isSplit()) g_action_group_activate_action(actionGroup, "toggle-split", nullptr);
+
+        pumpEvents(10);
+        g_assert_false(drawer->isVisible());
+        g_assert_false(inspector->isVisible());
+        g_assert_false(window->getSplitView()->isSplit());
+    });
+
+    // TEST 20: Vector 3.2: 50MB Checksum Stress & Cancellation Storm
+    runTest("Vector 3.2: 50MB Checksum Stress & Cancellation Storm (100 rapid cancellations)", [&]() {
+        std::string testFile = "/tmp/dfiles_stress_50mb_" + std::to_string(getpid()) + ".bin";
+        std::filesystem::remove(testFile);
+
+        // Create 50MB binary test file with deterministic pattern
+        {
+            std::ofstream ofs(testFile, std::ios::binary);
+            constexpr size_t CHUNK_SIZE = 1024 * 1024; // 1MB chunks
+            std::vector<char> chunk(CHUNK_SIZE);
+            for (size_t i = 0; i < CHUNK_SIZE; ++i) {
+                chunk[i] = static_cast<char>((i * 73 + 19) & 0xFF);
+            }
+            for (int mb = 0; mb < 50; ++mb) {
+                ofs.write(chunk.data(), CHUNK_SIZE);
+            }
+        }
+        g_assert_true(std::filesystem::exists(testFile));
+        g_assert_cmpuint(std::filesystem::file_size(testFile), ==, 50 * 1024 * 1024);
+
+        g_autoptr(GFile) gfile = g_file_new_for_path(testFile.c_str());
+
+        // Stress Part A: 100 rapid compute/cancel cycles on a single ChecksumHelper
+        {
+            dfiles::inspector::ChecksumHelper helper;
+            for (int i = 0; i < 100; ++i) {
+                helper.computeAsync(gfile, [](const dfiles::inspector::ChecksumResult&) {});
+                if (i % 4 == 0) {
+                    g_main_context_iteration(nullptr, FALSE);
+                }
+                helper.cancel();
+                g_assert_false(helper.isRunning());
+            }
+        }
+        pumpEvents(10);
+
+        // Stress Part B: 25 rapid ChecksumHelper instantiations and immediate destructions (RAII UAF / leak check)
+        for (int i = 0; i < 25; ++i) {
+            auto helper = std::make_unique<dfiles::inspector::ChecksumHelper>();
+            helper->computeAsync(gfile, [](const dfiles::inspector::ChecksumResult&) {});
+            if (i % 3 == 0) {
+                g_main_context_iteration(nullptr, FALSE);
+            }
+            // Reset immediately while background worker is streaming chunks
+            helper.reset();
+        }
+        pumpEvents(20);
+
+        // Verification Part C: Compute full 50MB checksum to completion and verify validity
+        {
+            dfiles::inspector::ChecksumHelper helper;
+            bool completed = false;
+            dfiles::inspector::ChecksumResult finalResult;
+
+            helper.computeAsync(gfile, [&](const dfiles::inspector::ChecksumResult& res) {
+                completed = true;
+                finalResult = res;
+            });
+
+            bool pumpOk = pumpWhile([&]() { return !completed; }, 30000);
+            g_assert_true(pumpOk);
+            g_assert_true(finalResult.success);
+            g_assert_cmpuint(finalResult.md5.size(), ==, 32);
+            g_assert_cmpuint(finalResult.sha256.size(), ==, 64);
+            g_print("    [Info] 50MB Checksums - MD5: %s | SHA-256: %s\n",
+                    finalResult.md5.c_str(), finalResult.sha256.c_str());
+        }
+
+        // Cleanup
+        std::filesystem::remove(testFile);
+    });
+
+    // TEST 21: Vector 3.3: Malformed & Hostile OSC 7 URI Fuzzing
+    runTest("Vector 3.3: Malformed & Hostile OSC 7 URI Fuzzing", [&]() {
+        auto window = std::make_unique<dfiles::ui::DFilesWindow>(app);
+        auto* drawer = window->getTerminalDrawer();
+        g_assert_nonnull(drawer);
+
+        // Make drawer visible so onShellDirectoryChanged is enabled
+        drawer->setVisible(true);
+        g_assert_true(drawer->isVisible());
+
+        auto* activePane = window->getSplitView()->getActivePane();
+        g_assert_nonnull(activePane);
+
+        // Baseline safe directory
+        g_autoptr(GFile) baselineGFile = g_file_new_for_path("/tmp");
+        activePane->navigateTo(baselineGFile);
+        pumpWhile([&]() { return activePane->getModel()->isLoading(); }, 5000);
+        GFile* curBefore = activePane->getCurrentDirectory();
+        g_assert_nonnull(curBefore);
+
+        // Hostile / Malformed OSC 7 payloads:
+        const std::vector<std::string> hostileOsc7Uris = {
+            // Foreign / remote schemes (must NEVER navigate)
+            "http://malicious.example.com/exploit",
+            "https://evil.corp/payload.sh",
+            "ftp://anonymous@ftp.upload.org/incoming",
+            "smb://malicious.lan/share",
+            "gopher://old.protocol/foo",
+            "data:text/html,<script>alert(1)</script>",
+            "file:",
+            "file://",
+            "file:///",
+            // Giant 128KB string buffer overflow attempt
+            std::string("file:///tmp/") + std::string(128 * 1024, 'A'),
+            // Format string vulnerability attack vectors
+            "file:///tmp/%s%s%n%x%p%d%s%s",
+            "file:///tmp/%08x.%08x.%08x.%08x",
+            // Path traversal attacks (must not escape into arbitrary paths blindly)
+            "file:///../../../../../../../../../../etc/shadow",
+            "file:///proc/kcore",
+            // Corrupted / malformed percent encoding
+            "file:///tmp/%ZZ%GG%FF%EE",
+            "file:///tmp/%",
+            "file:///tmp/%A",
+            // Embedded control characters / newlines
+            "file:///tmp/newline\nseparated\rcarriage",
+            "file:///tmp/escaped\x1b[31mred\x1b[0m",
+            // Nonexistent arbitrary paths
+            "file:///tmp/definitely_nonexistent_random_directory_987654321",
+        };
+
+        for (const auto& hostileUri : hostileOsc7Uris) {
+            if (drawer->onShellDirectoryChanged) {
+                drawer->onShellDirectoryChanged(hostileUri);
+            }
+            pumpEvents(1);
+        }
+
+        // Pump event loop to process any scheduled operations
+        pumpEvents(10);
+
+        // Active pane must still be alive and functional
+        g_assert_nonnull(activePane->getCurrentDirectory());
+
+        // Valid local file URI should successfully navigate
+        std::string validUri = "file:///tmp";
+        if (drawer->onShellDirectoryChanged) {
+            drawer->onShellDirectoryChanged(validUri);
+            pumpEvents(10);
+            g_autofree char* afterValid = g_file_get_path(activePane->getCurrentDirectory());
+            g_assert_cmpstr(afterValid, ==, "/tmp");
+        }
+    });
+
+    // TEST 22: Vector 3.4: Terminal Process Termination & Zombie Reap
+    runTest("Vector 3.4: Terminal Process Termination & Zombie Reap", [&]() {
+        // Test Part A: Standalone TerminalDrawer lifecycle and abrupt shell termination
+        {
+            auto drawer = std::make_unique<dfiles::terminal::TerminalDrawer>();
+            g_assert_nonnull(drawer->getWidget());
+            g_assert_nonnull(drawer->getTerminal());
+
+            drawer->setVisible(true);
+            g_assert_true(drawer->isVisible());
+            pumpEvents(10);
+
+            // Access child PID via VteTerminal
+            VteTerminal* vte = drawer->getTerminal();
+            g_assert_nonnull(vte);
+
+            // Send clear, syncDirectory, grabFocus commands to active terminal
+            g_autoptr(GFile) tmpDir = g_file_new_for_path("/tmp");
+            drawer->syncDirectory(tmpDir);
+            drawer->clear();
+            drawer->grabFocus();
+            pumpEvents(5);
+
+            // Reset and destroy drawer while shell process is running
+            // TerminalDrawer destructor must send SIGHUP/SIGTERM and call g_spawn_close_pid
+            drawer.reset();
+            pumpEvents(10);
+        }
+
+        // Test Part B: Rapid drawer creation, process spawn, and destruction churn (20 cycles)
+        for (int i = 0; i < 20; ++i) {
+            auto drawer = std::make_unique<dfiles::terminal::TerminalDrawer>();
+            drawer->setVisible(true);
+            if (i % 2 == 0) {
+                g_autoptr(GFile) dir = g_file_new_for_path("/tmp");
+                drawer->syncDirectory(dir);
+            }
+            pumpEvents(1);
+            // Abrupt destruction
+            drawer.reset();
+        }
+        pumpEvents(10);
+
+        // Test Part C: Reap verification (no lingering zombies from our tests)
+        int status = 0;
+        pid_t reaped = 0;
+        do {
+            reaped = waitpid(-1, &status, WNOHANG);
+        } while (reaped > 0);
     });
 
     // -------------------------------------------------------------

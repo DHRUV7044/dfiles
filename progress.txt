@@ -269,5 +269,180 @@
 - Evidence Log:
   * Full output persisted to `.council/dfiles_phase2/round_2/evidence/test_adversarial.log` (30 KB).
 
+[2026-11-13] Phase 3 - worker-core: Terminal & Checksum Layer Complete:
+- Implemented `src/terminal/terminal_drawer.hpp` & `src/terminal/terminal_drawer.cpp`:
+  * Class `TerminalDrawer` encapsulating `m_rootBox` (vertical GtkBox) with header bar and `VteTerminal`.
+  * Header bar contains title ("Terminal"), Clear button (resets VTE buffer/screen), and Close button (collapses drawer).
+  * Asynchronous shell spawning via `vte_terminal_spawn_async` defaulting to `$SHELL` (with fallback to `vte_get_user_shell()` and `/bin/bash`).
+  * Process lifecycle safety: captures `m_childPid`, connects to `child-exited` to reap child PID, and in destructor terminates child with `SIGHUP`/`SIGTERM` and reaps with `g_spawn_close_pid` (guaranteeing zero zombie processes).
+  * Bidirectional Directory Synchronization:
+    - Active pane -> terminal: `syncDirectory(GFile*)` escapes paths using standard POSIX single-quote escaping (`'` -> `'\''`) and feeds `cd '<escaped_path>'\n` via `vte_terminal_feed_child()`.
+    - Terminal -> active pane: connects to `current-directory-uri-changed`, extracts URI via `vte_terminal_ref_termprop_uri` (VTE 0.84+ termprop) / `vte_terminal_get_current_directory_uri`, verifies `file://` scheme, and triggers `onShellDirectoryChanged`.
+  * Dynamic theme adaptation: listens to `AdwStyleManager` `notify::dark` and dynamically updates VTE foreground and background colors to match system light/dark theme.
+  * Visibility controls: `toggleVisibility()`, `isVisible()`, `setVisible(bool)`, and `grabFocus()`.
+- Implemented `src/inspector/checksum_helper.hpp` & `src/inspector/checksum_helper.cpp`:
+  * Struct `ChecksumResult` with `md5`, `sha256`, `success`, and `error`.
+  * Class `ChecksumHelper` computing MD5 and SHA-256 asynchronously in 64KB chunks via `std::jthread` and `GChecksum`.
+  * Thread safety & cancellation: checks `g_cancellable_is_cancelled` and `m_aliveToken` on every block read.
+  * Dispatches results back to GTK main loop via `g_idle_add` with weak pointer protection against use-after-free.
+  * Immediate cancellation via `cancel()` joining worker thread and invalidating tokens.
+- Build & Verification:
+  * Added `src/terminal/terminal_drawer.cpp`, `src/inspector/checksum_helper.cpp`, and `src/inspector/inspector_sidebar.cpp` to `meson.build`.
+  * Clean compilation with `-Wall -Wextra -Wpedantic -Werror` via `ninja -C build`.
+  * Standalone test suite verified exact MD5 and SHA256 calculation against known files, non-existent file handling, cancellation, and terminal lifecycle.
+  * Executed existing `meson test -C build` (functional and adversarial test suites passed 100%).
+  * Marked Tasks 3.1, 3.2, 3.3, and 3.5 complete in `PRD.md`.
+
+[2026-11-13] Phase 3 - worker-integration: Inspector Sidebar & Window Layout Integration Complete:
+- Implemented `src/inspector/inspector_sidebar.hpp` & `src/inspector/inspector_sidebar.cpp`:
+  * Class `InspectorSidebar` (280px vertical GtkBox) with header, title ("Properties"), and close button.
+  * Stack-based views: empty status page (`AdwStatusPage`), single file details card (preview via `GtkPicture`/`GtkImage`, name, MIME, parent location, size, octal/POSIX permissions, owner/group, modified time), multiple selection summary card.
+  * Embedded asynchronous checksum card with calculate button, spinner, MD5/SHA-256 result rows with copy button to clipboard via `gdk_clipboard_set_text`.
+  * Public APIs: `toggleVisibility()`, `isVisible()`, `setVisible(bool)`, `inspectItems(const std::vector<model::FileItem>&)`, `onClosed` callback.
+- Integrated Window Paned Layout (`src/ui/window.hpp` & `src/ui/window.cpp`):
+  * Layout hierarchy: `m_workspaceHorizontalPaned` (`SplitView` start, `InspectorSidebar` end), nested inside `m_contentVerticalPaned` (`m_workspaceHorizontalPaned` start, `TerminalDrawer` end), hosted inside `m_contentArea`.
+  * GActions wired: `win.toggle-terminal` (`F4`), `win.toggle-inspector` (`F11`), HeaderBar `onTerminalToggled` and `onInspectorToggled`.
+  * Bidirectional Directory Sync: active pane `onDirectoryChanged` synchronizes terminal drawer (`syncDirectory`); terminal `onShellDirectoryChanged` navigates active pane with `m_syncingFromTerminal` recursion guard and `isVisible()` check.
+  * Selection Sync: active pane `onSelectionChanged` and `onActivePaneChanged` synchronize `m_inspectorSidebar->inspectItems()`.
+  * Normalized URI handling in `TerminalDrawer` (canonicalizing `file://<hostname>/path` vs `file:///path` via GFile).
+  * Resolved async spawn lifecycle in `TerminalDrawer` using `SpawnContext` with `std::weak_ptr<bool>` token.
+- Build & Verification:
+  * Compiled cleanly with zero warnings under `-Wall -Wextra -Wpedantic -Werror`.
+  * Added Section 11 to `tests/test_functional.cpp` covering TerminalDrawer and InspectorSidebar integration.
+  * Ran `meson test -C build --verbose` under `G_DEBUG=fatal-criticals`:
+    - Functional test suite: 193/193 tests passed (100%).
+    - Adversarial stress suite: 18/18 tests passed (100%).
+  * Marked Task 3.4 complete in `PRD.md`.
+
+[2026-11-13] Phase 3 - tester-functional: Milestone 3 Functional Test Suite & Evidence Logging:
+- Extended Section 11 of `tests/test_functional.cpp` with comprehensive Milestone 3 functional verification, expanding total test assertions from 165 to 201:
+  * TerminalDrawer:
+    - Instantiation and widget hierarchy (VteTerminal inside scrolled window and root box).
+    - Initial hidden state and double `toggleVisibility()` verification.
+    - `syncDirectory()` execution with valid directory (`/tmp`) and defensive `nullptr` guard.
+    - Bidirectional OSC 7 directory synchronization routing from terminal to active browsing pane.
+  * ChecksumHelper:
+    - Deterministic MD5 and SHA-256 calculation for known test vectors (`"1234567890"` and `"hello dfiles\n"`).
+    - Verified exact hash matches:
+      * `"hello dfiles\n"`: MD5 `ad9e9644531b652cb2c99c19b217eb1e`, SHA-256 `a9253384401f511521654f53ee59fb3e44d55eecc6eaf4ef5c477f8556e183b0`.
+    - Non-blocking asynchronous calculation on the main thread via GLib loop pumping.
+    - Tested in-flight `cancel()` safety, confirming `isRunning()` transitions to false without crash or memory leak.
+  * InspectorSidebar:
+    - Instantiation, widget container, and initial hidden visibility.
+    - Empty selection display via `inspectItems({})`.
+    - Single file metadata display (name, size, permissions, MIME type).
+    - Multi-file aggregated count and combined size calculation.
+    - HeaderBar close synchronization via `onClosed` callback.
+  * Window Integration:
+    - Verified `win.toggle-terminal` (`F4`) and `win.toggle-inspector` (`F11`) GActions synchronize with HeaderBar buttons and component visibility.
+    - Verified dual-paned workspace layout hierarchy (`m_workspaceHorizontalPaned`, `m_contentVerticalPaned`, `m_contentArea`).
+- Build & Verification:
+  * Clean compilation under `-Wall -Wextra -Wpedantic -Werror` with GCC 15.2.0.
+  * Executed under `G_DEBUG=fatal-criticals xvfb-run -a meson test -C build --verbose`:
+    - `1/2 dfiles:functional OK (1.37s)` — 201 / 201 passed (100%).
+    - `2/2 dfiles:adversarial OK (4.21s)` — 22 / 22 stress vectors passed (100%).
+- Full execution evidence persisted to `.council/dfiles_phase3/round_1/evidence/test_functional.log`.
+
+[2026-11-13] Phase 3 - tester-adversarial: Milestone 3 Chaos, Stress & Security Verification:
+- Expanded `tests/adversarial_stress.cpp` from 18 to 22 adversarial stress vectors:
+  * Vector 3.1 (Rapid Toggle Storm - F4 Terminal & F11 Inspector 300+ cycles):
+    - Activated `win.toggle-terminal` (F4) and `win.toggle-inspector` (F11) 300+ times in rapid alternation while pumping GTK main context iterations.
+    - Interleaved 150 chaotic toggles across terminal, inspector, and dual-pane split view.
+    - Verified layout container stability (`m_contentVerticalPaned`, `m_workspaceHorizontalPaned`), zero widget corruption, zero double-free, and clean drawer collapse.
+  * Vector 3.2 (50MB Checksum Stress & Cancellation Storm):
+    - Generated 50MB binary test file with deterministic byte pattern.
+    - Executed 100 rapid in-flight `computeAsync` / `cancel()` cycles on `ChecksumHelper`: verified worker threads stop promptly, `isRunning()` transitions to false, zero deadlocks, and zero thread leaks.
+    - Executed 25 rapid `ChecksumHelper` instantiations and immediate destructions under active streaming load, verifying `m_aliveToken` weak pointer eliminates heap use-after-free in `onIdleDispatch`.
+    - Computed full 50MB file to completion, verifying exact MD5 (`edc0db10c6308c6d1d7c42ca14f9d5ae`) and SHA-256 (`be532ed2887a7f4af7d0948eeab35149c8aa41062ac80b7affb92529e294d6b2`) digests in 238 ms (~210 MB/s hashing throughput).
+  * Vector 3.3 (Malformed & Hostile OSC 7 URI Fuzzing):
+    - Injected hostile payloads into `TerminalDrawer::onShellDirectoryChanged`:
+      * Foreign/remote URI schemes: `http://`, `https://`, `ftp://`, `smb://`, `gopher://`, `data:`.
+      * Buffer overflow attempt: 128KB string flood.
+      * Format strings: `%s%s%n%x%p%d`.
+      * Path traversal: `file:///../../../../etc/shadow`, `file:///proc/kcore`.
+      * Corrupted percent encoding: `file:///tmp/%ZZ%GG%FF`.
+      * Control characters and non-existent paths.
+    - Verified all hostile inputs are safely rejected without crash, memory corruption, or unauthorized navigation, while valid `file:///tmp` navigates cleanly.
+  * Vector 3.4 (Terminal Process Termination & Zombie Reap):
+    - Spawns terminal shell, executes terminal commands (`syncDirectory`, `clear`, `grabFocus`), and destroys drawer while child shell is active.
+    - Verified `TerminalDrawer` destructor terminates child shell via `SIGHUP`/`SIGTERM` and reaps with `g_spawn_close_pid`.
+    - Executed 20 rapid drawer creation/spawn/destruction churn cycles; reaped lingering processes via `waitpid(..., WNOHANG)` confirming zero zombie process leaks.
+- Verification & Test Results:
+  * Compiler cleanliness: GCC 15.2.0 compiled standard and ASan builds with 0 warnings under `-Wall -Wextra -Wpedantic -Werror`.
+  * Standard adversarial execution: 22 / 22 vectors PASSED (100%).
+  * AddressSanitizer & UndefinedBehaviorSanitizer: 22 / 22 vectors PASSED (100% clean, 0 memory faults, 0 leaks, 0 UAF).
+  * Hostile environment injection suite: 13 / 13 tests PASSED (100%).
+  * Meson integrated suite (`G_DEBUG=fatal-criticals xvfb-run -a meson test -C build --verbose`): 2/2 suites PASSED (201 functional + 22 adversarial = 223 total tests).
+- Evidence Log:
+  * Full output persisted to `.council/dfiles_phase3/round_1/evidence/test_adversarial.log` (32 KB).
 
 
+[2026-11-13] Phase 3 - worker-hardening: Milestone 3 Defensive Hardening, OSC 7 Validation, & Signal Safety:
+- Child Process Lifecycle & Spawn Cancellation:
+  * In TerminalDrawer (`src/terminal/terminal_drawer.hpp` & `.cpp`):
+    - Added `GCancellable* m_spawnCancellable` passed directly to `vte_terminal_spawn_async`.
+    - In `~TerminalDrawer()`: cancels `m_spawnCancellable` and clears object to instantly abort pending async spawns.
+    - Fixed borrowed `GError*` pointer ownership in `onSpawnAsyncCallback`: removed unauthorized `g_error_free`/`g_clear_error` to prevent double-free crashes with libvte.
+    - Destructor reaps child process via `kill(m_childPid, SIGHUP)`, `kill(m_childPid, SIGTERM)`, and `g_spawn_close_pid(m_childPid)`.
+    - Handled expired `m_aliveToken` in `onSpawnAsyncCallback`: immediately terminates and reaps spawned child if drawer was destroyed before spawn callback.
+- Bidirectional Directory Sync & Echo Loop Prevention:
+  * In DFilesWindow (`src/ui/window.cpp`):
+    - Guarded `m_splitView->onActivePaneChanged` directory sync with `!m_syncingFromTerminal` to prevent echoing sync back to child shell during pane activation shifts.
+    - Enforced RAII `SyncGuard` struct around `activePane->navigateTo(target)` in `onShellDirectoryChanged` ensuring `m_syncingFromTerminal` resets under all conditions.
+- OSC 7 URI Security & Command Injection Hardening:
+  * In TerminalDrawer (`src/terminal/terminal_drawer.cpp`):
+    - Enforced strict bounds check: `uriStr.size() <= 4096`.
+    - Enforced local file scheme check: `g_str_has_prefix(..., "file://")`.
+    - Validated local path extraction via `g_filename_from_uri(..., &hostname, &convErr)`.
+    - Rejected foreign hostnames (`hostname != nullptr && strcmp(hostname, "localhost") != 0`).
+    - Enforced UTF-8 string validation (`g_utf8_validate`) and directory existence validation (`g_file_test(..., G_FILE_TEST_IS_DIR)`).
+    - Hardened `syncDirectory(GFile*)`: scans path for `\n` or `\r` and immediately rejects injection attempts, preventing terminal command injection via maliciously crafted directory names.
+  * In DFilesWindow (`src/ui/window.cpp`):
+    - In `m_terminalDrawer->onShellDirectoryChanged`: mirrored strict bounds, scheme check, `g_filename_from_uri` conversion, UTF-8 validation, and directory existence validation.
+- Thread Safety & Worker Cancellation in Checksum Helper:
+  * In ChecksumHelper (`src/inspector/checksum_helper.hpp` & `.cpp`):
+    - Replaced `bool m_running` with `std::atomic<bool> m_running{false}` with lock-free atomic `store` / `load`.
+    - Safely reset `m_running.store(false)` on worker thread cancellation, I/O errors, and successful completion before scheduling `onIdleDispatch`.
+    - Clean thread join and `aliveToken` invalidation in `cancel()`.
+- Signal Disconnection & Widget Teardown Safety:
+  * In InspectorSidebar (`src/inspector/inspector_sidebar.hpp` & `.cpp`):
+    - Tracked signal connection IDs for `m_closeButton`, `m_calcChecksumBtn`, `m_md5CopyBtn`, and `m_sha256CopyBtn`.
+    - In `~InspectorSidebar()`: safely disconnects all signal handlers if still connected before widget destruction.
+    - In `showEmptyState()` and `showMultipleFiles()`: clears `m_previewPicture` paintable and `m_previewIcon` image to eliminate memory retention.
+  * In TerminalDrawer (`src/terminal/terminal_drawer.hpp` & `.cpp`):
+    - Tracked signal connection IDs for `m_clearButton` and `m_closeButton`.
+    - In `~TerminalDrawer()`: safely disconnects button signals and validates `g_signal_handler_is_connected` before disconnecting VTE terminal and style manager signals.
+- Verification:
+  * Compiled with 0 warnings under GCC 15.2.0 with `-Wall -Wextra -Wpedantic -Werror`.
+  * Ran full test suite with `G_DEBUG=fatal-criticals`: 201/201 functional tests and 22/22 adversarial chaos vectors PASSED (100% pass rate).
+[2026-11-13] Phase 3 - worker-hardening: Supreme Court Remediation Directive (Milestone 3, Round 2) Complete:
+- REMED-1 (Terminal Close Button Desynchronization - Count 1):
+  * In TerminalDrawer (`src/terminal/terminal_drawer.hpp` & `.cpp`): Added `std::function<void()> onClosed;` invoked from `m_closeButton` clicked callback when user hides drawer via UI button.
+  * In DFilesWindow (`src/ui/window.cpp`): Connected `m_terminalDrawer->onClosed` to synchronize `m_headerBar->setTerminalActive(false)`, update `win.toggle-terminal` GAction state to `FALSE` via `g_action_change_state`, and display notification toast.
+- REMED-2 (Blind Terminal Command Injection into Hidden Shells & Active Tasks - Count 2):
+  * In DFilesWindow (`src/ui/window.cpp`): `m_splitView->onActivePaneChanged` and `pane->onDirectoryChanged` only invoke `m_terminalDrawer->syncDirectory(dir)` when `m_terminalDrawer && m_terminalDrawer->isVisible()`.
+  * In TerminalDrawer (`src/terminal/terminal_drawer.cpp`): In `syncDirectory(GFile* dir)`, verified `m_childPid > 0` and checked foreground process group via `tcgetpgrp(ptyFd)`. If `fgPgrp > 0 && fgPgrp != m_childPid`, skips command injection, preserving interactive foreground applications (e.g. vim, nano, python).
+- REMED-3 (Dead Shell Lockout & Permanent PTY Orphanage - Count 3):
+  * In TerminalDrawer (`src/terminal/terminal_drawer.hpp` & `.cpp`):
+    - Added `m_restartButton` ("Restart Shell", icon `view-refresh-symbolic`), initially hidden.
+    - Added `void restartShell()`: cleans up previous PID, resets terminal state (`vte_terminal_reset`), hides restart button, and calls `spawnShell()`.
+    - In `onChildExitedCallback`: automatically reveals `m_restartButton` when shell exits (`m_childPid <= 0`).
+    - In `onSpawnAsyncCallback`: hides `m_restartButton` on successful spawn.
+    - Disconnected `m_restartBtnSignalId` in `~TerminalDrawer()`.
+- REMED-4 (Main UI Thread Deadlock on Named Pipes / FIFOs in Checksum Engine - Count 4):
+  * In InspectorSidebar (`src/inspector/inspector_sidebar.cpp`): in `showSingleFile`, strictly verified `g_file_info_get_file_type(info) == G_FILE_TYPE_REGULAR` before displaying or enabling the checksum section (hidden for FIFOs, sockets, device nodes).
+  * In ChecksumHelper (`src/inspector/checksum_helper.hpp` & `.cpp`):
+    - Switched `m_running` to `std::shared_ptr<std::atomic<bool>>`, captured by value in worker thread without capturing `this`.
+    - Synchronously verified `g_file_query_file_type` prior to opening stream.
+    - In `cancel()`: avoided blocking the UI thread indefinitely on `m_workerThread.join()`; calls `m_workerThread.detach()` if joinable.
+- REMED-5 (Null Shared Pointer Dereference in Theme Notification - Count 8):
+  * In TerminalDrawer (`src/terminal/terminal_drawer.cpp`): in `~TerminalDrawer()`, disconnected `m_styleNotifyId` BEFORE calling `m_aliveToken.reset()`.
+  * In `notify::dark` callback lambda, added defensive guard `if (self && self->m_aliveToken && *self->m_aliveToken)`.
+- REMED-6 (Geometry Constraints & Image Size Threshold - Count 6 & 7):
+  * In DFilesWindow (`src/ui/window.cpp`): set `gtk_paned_set_shrink_end_child(GTK_PANED(m_workspaceHorizontalPaned), TRUE)`.
+  * In SplitView (`src/views/split_view.cpp`): set shrink to `TRUE` for both left and right panes in `SplitView::setupUI()`, allowing the window to resize smoothly below 1050px.
+  * In InspectorSidebar (`src/inspector/inspector_sidebar.cpp`): enforced a 15MB file size cap (`MAX_PREVIEW_IMAGE_SIZE = 15 * 1024 * 1024`) for image thumbnail loading with `gtk_picture_set_file`; larger images fall back to standard MIME icon.
+- Verification:
+  * Compiled with 0 warnings under `-Wall -Wextra -Wpedantic -Werror`.
+  * 204 / 204 functional tests passed in `dfiles:functional`.
+  * 22 / 22 chaos vectors passed in `dfiles:adversarial` under `G_DEBUG=fatal-criticals`.

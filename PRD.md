@@ -134,11 +134,11 @@ dfiles/
 - [ ] Task 2.6: Implement inline instant Filter Bar (`Ctrl+I`).
 
 ### Milestone 3: Integrated Terminal (`F4`) & Live Inspector (`F11`)
-- [ ] Task 3.1: Build `TerminalDrawer` wrapping `VteTerminal` with smooth collapse/expand (`F4`).
-- [ ] Task 3.2: Implement terminal directory auto-sync: pane navigation triggers terminal `cd`.
-- [ ] Task 3.3: Implement terminal OSC 7 parsing: terminal `cd` triggers pane navigation.
-- [ ] Task 3.4: Build `InspectorSidebar` (`F11`) with metadata, permissions, and preview thumbnail.
-- [ ] Task 3.5: Add background checksum generation (MD5, SHA-256) inside inspector.
+- [x] Task 3.1: Build `TerminalDrawer` wrapping `VteTerminal` with smooth collapse/expand (`F4`).
+- [x] Task 3.2: Implement terminal directory auto-sync: pane navigation triggers terminal `cd`.
+- [x] Task 3.3: Implement terminal OSC 7 parsing: terminal `cd` triggers pane navigation.
+- [x] Task 3.4: Build `InspectorSidebar` (`F11`) with metadata, permissions, and preview thumbnail.
+- [x] Task 3.5: Add background checksum generation (MD5, SHA-256) inside inspector.
 
 ### Milestone 4: Operations, Polish, and Quality Gates
 - [ ] Task 4.1: Implement async file operations (Copy, Cut, Paste, Trash, Permanent Delete, New Folder).

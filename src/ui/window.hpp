@@ -7,6 +7,8 @@
 #include <string>
 #include <vector>
 
+#include "inspector/inspector_sidebar.hpp"
+#include "terminal/terminal_drawer.hpp"
 #include "ui/headerbar.hpp"
 #include "ui/sidebar.hpp"
 #include "views/split_view.hpp"
@@ -38,6 +40,8 @@ public:
     [[nodiscard]] DFilesHeaderBar* getHeaderBar() const;
     [[nodiscard]] PlacesSidebar* getSidebar() const;
     [[nodiscard]] views::SplitView* getSplitView() const noexcept;
+    [[nodiscard]] terminal::TerminalDrawer* getTerminalDrawer() const noexcept;
+    [[nodiscard]] inspector::InspectorSidebar* getInspectorSidebar() const noexcept;
     [[nodiscard]] GtkWidget* getContentArea() const;
 
 private:
@@ -51,10 +55,16 @@ private:
     GtkWidget* m_toastOverlay{nullptr};
     GtkWidget* m_mainPaned{nullptr};
     GtkWidget* m_contentArea{nullptr};
+    GtkWidget* m_contentVerticalPaned{nullptr};
+    GtkWidget* m_workspaceHorizontalPaned{nullptr};
 
     std::unique_ptr<DFilesHeaderBar> m_headerBar;
     std::unique_ptr<PlacesSidebar> m_sidebar;
     std::unique_ptr<views::SplitView> m_splitView;
+    std::unique_ptr<terminal::TerminalDrawer> m_terminalDrawer;
+    std::unique_ptr<inspector::InspectorSidebar> m_inspectorSidebar;
+
+    bool m_syncingFromTerminal{false};
 
     // REMED-1: Off-thread toast thread safety & pending source lifecycle tracking
     std::mutex m_toastMutex;
