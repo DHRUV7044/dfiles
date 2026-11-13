@@ -105,6 +105,30 @@ std::vector<model::FileItem> PaneView::getSelectedItems() const {
     return {};
 }
 
+std::vector<GFile*> PaneView::getSelectedFiles() const {
+    std::vector<GFile*> result;
+    auto items = getSelectedItems();
+    result.reserve(items.size());
+    for (const auto& item : items) {
+        if (item.getGFile()) {
+            result.push_back(G_FILE(g_object_ref(item.getGFile())));
+        }
+    }
+    return result;
+}
+
+void PaneView::showContextMenu() {
+    if (m_fileView) {
+        m_fileView->showContextMenu();
+    }
+}
+
+void PaneView::showItemContextMenu() {
+    if (m_fileView) {
+        m_fileView->showItemContextMenu();
+    }
+}
+
 void PaneView::grabFocus() {
     if (m_fileView) {
         m_fileView->grabFocus();

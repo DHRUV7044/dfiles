@@ -9,6 +9,7 @@
 #include "terminal/terminal_drawer.hpp"
 #include "views/pane_view.hpp"
 #include "views/split_view.hpp"
+#include "operations/file_ops.hpp"
 
 #include <adwaita.h>
 #include <fcntl.h>
@@ -31,6 +32,8 @@
 #include <vector>
 
 namespace {
+
+namespace fs = std::filesystem;
 
 void pumpEvents(int iterations = 10) {
     for (int i = 0; i < iterations; ++i) {
@@ -1208,6 +1211,429 @@ int main(int /*argc*/, char* /*argv*/[]) {
         do {
             reaped = waitpid(-1, &status, WNOHANG);
         } while (reaped > 0);
+    });
+
+    // -------------------------------------------------------------
+    // VECTOR 4: MILESTONE 4 ASYNC FILE OPS, RECURSION & CHAOS
+    // -------------------------------------------------------------
+
+    // TEST 23: Vector 4.1: Deep Directory Recursion Stress (50 nested levels deep)
+    runTest("Vector 4.1: Deep Directory Recursion Stress (50 nested levels deep)", [&]() {
+        fs::path tempRoot = fs::temp_directory_path() / ("dfiles_stress_deep_" + std::to_string(g_random_int()));
+        std::error_code ec;
+        fs::remove_all(tempRoot, ec);
+        fs::create_directories(tempRoot);
+
+        fs::path srcRoot = tempRoot / "src_hierarchy";
+        fs::path cur = srcRoot;
+        for (int i = 0; i < 50; ++i) {
+            char buf[16];
+            std::snprintf(buf, sizeof(buf), "d_%02d", i);
+            cur = cur / buf;
+        }
+        fs::create_directories(cur);
+
+        // Place payload files at various depths (level 0, level 20, level 49)
+        std::string payload0 = "Root payload level 0 content with some size padding...";
+        std::string payload20 = "Intermediate payload level 20 with integrity verification string.";
+        std::string payload49 = "Deep leaf payload level 49 content: testing stack frames!";
+
+        {
+            std::ofstream out0(srcRoot / "payload_00.txt");
+            out0 << payload0;
+
+            fs::path cur20 = srcRoot;
+            for (int i = 0; i <= 20; ++i) {
+                char buf[16];
+                std::snprintf(buf, sizeof(buf), "d_%02d", i);
+                cur20 = cur20 / buf;
+            }
+            std::ofstream out20(cur20 / "payload_20.txt");
+            out20 << payload20;
+
+            std::ofstream out49(cur / "payload_49.txt");
+            out49 << payload49;
+        }
+
+        fs::path dstDir = tempRoot / "dst_hierarchy";
+        fs::create_directories(dstDir);
+
+        g_autoptr(GFile) srcGFile = g_file_new_for_path(srcRoot.c_str());
+        g_autoptr(GFile) dstGFile = g_file_new_for_path(dstDir.c_str());
+
+        dfiles::operations::FileOperations ops;
+        bool done = false;
+        bool successResult = false;
+        std::string resultMsg;
+
+        ops.copyAsync({srcGFile}, dstGFile, false, [&](bool success, const std::string& msg) {
+            done = true;
+            successResult = success;
+            resultMsg = msg;
+        });
+
+        bool finished = pumpWhile([&]() { return !done; }, 20000);
+        g_assert_true(finished);
+        g_assert_true(successResult);
+
+        // Verify destination exists 50 levels deep without stack overflow
+        fs::path dstDeep = dstDir / "src_hierarchy";
+        for (int i = 0; i < 50; ++i) {
+            char buf[16];
+            std::snprintf(buf, sizeof(buf), "d_%02d", i);
+            dstDeep = dstDeep / buf;
+        }
+        g_assert_true(fs::exists(dstDeep));
+        g_assert_true(fs::exists(dstDeep / "payload_49.txt"));
+
+        // Verify content integrity
+        std::ifstream in49(dstDeep / "payload_49.txt");
+        std::string read49((std::istreambuf_iterator<char>(in49)), std::istreambuf_iterator<char>());
+        g_assert_cmpstr(read49.c_str(), ==, payload49.c_str());
+
+        fs::remove_all(tempRoot, ec);
+    });
+
+    // TEST 24: Vector 4.2: Cyclic Symlink Attack (Self, Mutual & Parent Symlink Loops)
+    runTest("Vector 4.2: Cyclic Symlink Attack", [&]() {
+        fs::path tempRoot = fs::temp_directory_path() / ("dfiles_stress_symlink_" + std::to_string(g_random_int()));
+        std::error_code ec;
+        fs::remove_all(tempRoot, ec);
+        fs::path srcDir = tempRoot / "symlink_src";
+        fs::path dstDir = tempRoot / "symlink_dst";
+        fs::create_directories(srcDir);
+        fs::create_directories(dstDir);
+
+        // 1. Self loop: self_loop -> .
+        fs::create_symlink(".", srcDir / "self_loop");
+        // 2. Parent loop: parent_loop -> ..
+        fs::create_symlink("..", srcDir / "parent_loop");
+        // 3. Mutual loop: sym_a -> sym_b, sym_b -> sym_a
+        fs::create_symlink("sym_b", srcDir / "sym_a");
+        fs::create_symlink("sym_a", srcDir / "sym_b");
+        // 4. Normal regular payload file
+        std::string normalContent = "Normal regular content amidst symlink minefield";
+        std::ofstream(srcDir / "normal.txt") << normalContent;
+
+        g_autoptr(GFile) srcGFile = g_file_new_for_path(srcDir.c_str());
+        g_autoptr(GFile) dstGFile = g_file_new_for_path(dstDir.c_str());
+
+        dfiles::operations::FileOperations ops;
+        bool done = false;
+        bool successResult = false;
+        std::string resultMsg;
+
+        ops.copyAsync({srcGFile}, dstGFile, false, [&](bool success, const std::string& msg) {
+            done = true;
+            successResult = success;
+            resultMsg = msg;
+        });
+
+        // Must complete promptly without hanging in infinite recursion
+        bool finished = pumpWhile([&]() { return !done; }, 10000);
+        g_assert_true(finished);
+        g_assert_true(successResult);
+
+        // Destination directory should contain the symlinks themselves (G_FILE_COPY_NOFOLLOW_SYMLINKS)
+        fs::path copiedDir = dstDir / "symlink_src";
+        g_assert_true(fs::is_symlink(copiedDir / "self_loop"));
+        g_assert_true(fs::is_symlink(copiedDir / "parent_loop"));
+        g_assert_true(fs::is_symlink(copiedDir / "sym_a"));
+        g_assert_true(fs::is_symlink(copiedDir / "sym_b"));
+        g_assert_true(fs::exists(copiedDir / "normal.txt"));
+
+        std::ifstream inNorm(copiedDir / "normal.txt");
+        std::string readNorm((std::istreambuf_iterator<char>(inNorm)), std::istreambuf_iterator<char>());
+        g_assert_cmpstr(readNorm.c_str(), ==, normalContent.c_str());
+
+        fs::remove_all(tempRoot, ec);
+    });
+
+    // TEST 25: Vector 4.3: Self-Nesting Target Attack (Dir into Self & Descendant)
+    runTest("Vector 4.3: Self-Nesting Target Attack", [&]() {
+        fs::path tempRoot = fs::temp_directory_path() / ("dfiles_stress_selfnest_" + std::to_string(g_random_int()));
+        std::error_code ec;
+        fs::remove_all(tempRoot, ec);
+        fs::path parentDir = tempRoot / "parent_dir";
+        fs::path subDir = parentDir / "sub_child";
+        fs::path deepSubDir = subDir / "deep_child";
+        fs::create_directories(deepSubDir);
+
+        std::string canaryData = "Canary file verifying original data is not corrupted";
+        std::ofstream(parentDir / "canary.txt") << canaryData;
+
+        g_autoptr(GFile) parentG = g_file_new_for_path(parentDir.c_str());
+        g_autoptr(GFile) subG = g_file_new_for_path(subDir.c_str());
+        g_autoptr(GFile) deepG = g_file_new_for_path(deepSubDir.c_str());
+
+        dfiles::operations::FileOperations ops;
+
+        // Sub-attack 1: Copy directory into its direct child (parent -> parent/sub_child)
+        {
+            bool done = false;
+            bool successResult = true;
+            std::string resultMsg;
+
+            ops.copyAsync({parentG}, subG, false, [&](bool success, const std::string& msg) {
+                done = true;
+                successResult = success;
+                resultMsg = msg;
+            });
+
+            bool finished = pumpWhile([&]() { return !done; }, 5000);
+            g_assert_true(finished);
+            g_assert_false(successResult);
+            g_assert_true(resultMsg.find("Cannot copy directory into itself") != std::string::npos ||
+                          resultMsg.find("subdirectory") != std::string::npos);
+            // Verify original data intact
+            g_assert_true(fs::exists(parentDir / "canary.txt"));
+        }
+
+        // Sub-attack 2: Copy directory into itself (parent -> parent)
+        {
+            bool done = false;
+            bool successResult = true;
+            std::string resultMsg;
+
+            ops.copyAsync({parentG}, parentG, false, [&](bool success, const std::string& msg) {
+                done = true;
+                successResult = success;
+                resultMsg = msg;
+            });
+
+            bool finished = pumpWhile([&]() { return !done; }, 5000);
+            g_assert_true(finished);
+            g_assert_false(successResult);
+            g_assert_true(fs::exists(parentDir / "canary.txt"));
+        }
+
+        // Sub-attack 3: Move directory into deep descendant (parent -> parent/sub_child/deep_child)
+        {
+            bool done = false;
+            bool successResult = true;
+            std::string resultMsg;
+
+            ops.moveAsync({parentG}, deepG, false, [&](bool success, const std::string& msg) {
+                done = true;
+                successResult = success;
+                resultMsg = msg;
+            });
+
+            bool finished = pumpWhile([&]() { return !done; }, 5000);
+            g_assert_true(finished);
+            g_assert_false(successResult);
+            // Must preserve original directory and canary file
+            g_assert_true(fs::exists(parentDir / "canary.txt"));
+        }
+
+        fs::remove_all(tempRoot, ec);
+    });
+
+    // TEST 26: Vector 4.4: Hostile Read-Only Destination (chmod 0555)
+    runTest("Vector 4.4: Hostile Read-Only Destination", [&]() {
+        fs::path tempRoot = fs::temp_directory_path() / ("dfiles_stress_ro_" + std::to_string(g_random_int()));
+        std::error_code ec;
+        fs::remove_all(tempRoot, ec);
+        fs::path srcDir = tempRoot / "src_dir";
+        fs::path roDir = tempRoot / "ro_dest";
+        fs::create_directories(srcDir);
+        fs::create_directories(roDir);
+
+        fs::path srcFile = srcDir / "important.doc";
+        std::string content = "Important payload that must remain untouched on write failure";
+        std::ofstream(srcFile) << content;
+
+        // Make destination read-only (chmod 0555 -> r-xr-xr-x)
+        g_assert_cmpint(chmod(roDir.c_str(), 0555), ==, 0);
+
+        g_autoptr(GFile) srcG = g_file_new_for_path(srcFile.c_str());
+        g_autoptr(GFile) roG = g_file_new_for_path(roDir.c_str());
+
+        dfiles::operations::FileOperations ops;
+
+        // Part A: Copy into read-only destination
+        {
+            bool done = false;
+            bool successResult = true;
+            std::string resultMsg;
+
+            ops.copyAsync({srcG}, roG, false, [&](bool success, const std::string& msg) {
+                done = true;
+                successResult = success;
+                resultMsg = msg;
+            });
+
+            bool finished = pumpWhile([&]() { return !done; }, 5000);
+            g_assert_true(finished);
+            g_assert_false(successResult);
+            // Source file must remain completely intact
+            g_assert_true(fs::exists(srcFile));
+        }
+
+        // Part B: Move into read-only destination
+        {
+            bool done = false;
+            bool successResult = true;
+            std::string resultMsg;
+
+            ops.moveAsync({srcG}, roG, false, [&](bool success, const std::string& msg) {
+                done = true;
+                successResult = success;
+                resultMsg = msg;
+            });
+
+            bool finished = pumpWhile([&]() { return !done; }, 5000);
+            g_assert_true(finished);
+            g_assert_false(successResult);
+            // Source file must NOT be destroyed or lost
+            g_assert_true(fs::exists(srcFile));
+            std::ifstream in(srcFile);
+            std::string readContent((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+            g_assert_cmpstr(readContent.c_str(), ==, content.c_str());
+        }
+
+        // Restore permissions for clean removal
+        int chmodRestore = chmod(roDir.c_str(), 0755);
+        (void)chmodRestore;
+        fs::remove_all(tempRoot, ec);
+    });
+
+    // TEST 27: Vector 4.5: Concurrency & Cancellation Hammering (50 Operations + Immediate Cancel)
+    runTest("Vector 4.5: Concurrency & Cancellation Hammering", [&]() {
+        fs::path tempRoot = fs::temp_directory_path() / ("dfiles_stress_cancel_" + std::to_string(g_random_int()));
+        std::error_code ec;
+        fs::remove_all(tempRoot, ec);
+        fs::path srcDir = tempRoot / "cancel_src";
+        fs::path dstDir = tempRoot / "cancel_dst";
+        fs::create_directories(srcDir);
+        fs::create_directories(dstDir);
+
+        // Create 10 files with 32KB payload each
+        std::vector<GFile*> srcFiles;
+        for (int i = 0; i < 10; ++i) {
+            fs::path p = srcDir / ("payload_" + std::to_string(i) + ".bin");
+            std::ofstream out(p, std::ios::binary);
+            std::string chunk(32768, static_cast<char>('A' + i));
+            out << chunk;
+            srcFiles.push_back(g_file_new_for_path(p.c_str()));
+        }
+
+        g_autoptr(GFile) dstG = g_file_new_for_path(dstDir.c_str());
+
+        // Part A: 50 sequential rapid launch and immediate cancel cycles on a single FileOperations
+        {
+            dfiles::operations::FileOperations ops;
+            for (int i = 0; i < 50; ++i) {
+                ops.copyAsync(srcFiles, dstG, true, [](bool, const std::string&) {});
+                ops.cancelCurrent();
+                g_assert_false(ops.isRunning());
+                if (i % 10 == 0) {
+                    pumpEvents(2);
+                }
+            }
+            pumpEvents(10);
+        }
+
+        // Part B: 20 concurrent FileOperations instances spawned and destroyed asynchronously
+        {
+            std::vector<std::unique_ptr<dfiles::operations::FileOperations>> opsPool;
+            opsPool.reserve(20);
+            for (int i = 0; i < 20; ++i) {
+                auto op = std::make_unique<dfiles::operations::FileOperations>();
+                op->copyAsync(srcFiles, dstG, true, [](bool, const std::string&) {});
+                opsPool.push_back(std::move(op));
+            }
+
+            // Immediately cancel half and destroy them in arbitrary order
+            for (int i = 0; i < 10; ++i) {
+                opsPool[i]->cancelCurrent();
+            }
+            pumpEvents(5);
+            opsPool.clear(); // Abrupt destruction of all instances while background threads detach
+            pumpEvents(15);
+        }
+
+        // Clean up GFile references
+        for (auto* f : srcFiles) {
+            g_object_unref(f);
+        }
+
+        fs::remove_all(tempRoot, ec);
+    });
+
+    // TEST 28: Vector 4.6: F5 / F6 Rapid Keyboard Hammering (100 Transfer Triggers in 500ms)
+    runTest("Vector 4.6: F5 / F6 Rapid Keyboard Hammering", [&]() {
+        fs::path tempRoot = fs::temp_directory_path() / ("dfiles_stress_f5f6_" + std::to_string(g_random_int()));
+        std::error_code ec;
+        fs::remove_all(tempRoot, ec);
+        fs::path leftDir = tempRoot / "left_pane";
+        fs::path rightDir = tempRoot / "right_pane";
+        fs::create_directories(leftDir);
+        fs::create_directories(rightDir);
+
+        // Create 15 test files in left pane directory
+        for (int i = 0; i < 15; ++i) {
+            fs::path p = leftDir / ("item_" + std::to_string(i) + ".txt");
+            std::ofstream(p) << "Payload content for F5/F6 hammering " << i;
+        }
+
+        g_autoptr(GFile) leftG = g_file_new_for_path(leftDir.c_str());
+        g_autoptr(GFile) rightG = g_file_new_for_path(rightDir.c_str());
+
+        auto window = std::make_unique<dfiles::ui::DFilesWindow>(app);
+        g_assert_nonnull(window->getWidget());
+        auto* splitView = window->getSplitView();
+        g_assert_nonnull(splitView);
+
+        if (!splitView->isSplit()) {
+            splitView->toggleSplit();
+        }
+        g_assert_true(splitView->isSplit());
+
+        splitView->getLeftPane()->navigateTo(leftG);
+        splitView->getRightPane()->navigateTo(rightG);
+        pumpEvents(15);
+
+        // Select all files in active pane
+        if (splitView->getActivePane() && splitView->getActivePane()->getFileView()) {
+            splitView->getActivePane()->getFileView()->selectAll();
+        }
+        pumpEvents(5);
+
+        auto* winWidget = window->getWindow();
+        auto* actionGroup = G_ACTION_GROUP(winWidget);
+
+        // Rapidly trigger 100 transfer requests in 500ms
+        auto start = std::chrono::steady_clock::now();
+        for (int i = 0; i < 100; ++i) {
+            bool isMove = (i % 4 == 0); // Interleave 75% copy (F5), 25% move (F6)
+            if (i % 2 == 0) {
+                // Trigger via direct SplitView transferSelection
+                splitView->transferSelection(isMove);
+            } else {
+                // Trigger via GAction bindings (win.quick-copy / win.quick-move)
+                g_action_group_activate_action(actionGroup, isMove ? "quick-move" : "quick-copy", nullptr);
+            }
+
+            if (i % 10 == 0) {
+                pumpEvents(1);
+            }
+        }
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - start).count();
+        g_print("    [Info] 100 transfer triggers dispatched in %ld ms\n", elapsed);
+
+        // Drain pending idle sources and allow operations to cancel/settle cleanly
+        pumpEvents(50);
+
+        if (window->getFileOperations()) {
+            window->getFileOperations()->cancelCurrent();
+        }
+
+        window.reset();
+        pumpEvents(15);
+
+        fs::remove_all(tempRoot, ec);
     });
 
     // -------------------------------------------------------------

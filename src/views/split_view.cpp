@@ -2,11 +2,16 @@
 
 namespace dfiles::views {
 
-SplitView::SplitView() {
+SplitView::SplitView()
+    : m_aliveToken(std::make_shared<bool>(true)) {
     setupUI();
 }
 
 SplitView::~SplitView() {
+    if (m_aliveToken) {
+        *m_aliveToken = false;
+    }
+    onShowToast = nullptr;
     onActivePaneChanged = nullptr;
     if (m_leftPane) {
         m_leftPane->onActivated = nullptr;
@@ -107,8 +112,122 @@ void SplitView::toggleSplit() {
 }
 
 void SplitView::transferSelection(bool isMove) {
-    // Phase 5 full integration hook
-    (void)isMove;
+    if (!m_fileOps) {
+        return;
+    }
+
+    PaneView* active = getActivePane();
+    if (!active) {
+        return;
+    }
+
+    auto selectedFiles = active->getSelectedFiles();
+    if (selectedFiles.empty()) {
+        if (onShowToast) {
+            onShowToast("No files selected to transfer");
+        }
+        return;
+    }
+
+    // RAII guard ensuring all returned GFile* are unreffed on exit
+    struct FilesCleanup {
+        std::vector<GFile*>& files;
+        ~FilesCleanup() {
+            for (auto* f : files) {
+                if (f) {
+                    g_object_unref(f);
+                }
+            }
+        }
+    } cleanup{selectedFiles};
+
+    std::weak_ptr<bool> weakAlive = m_aliveToken;
+
+    if (m_isSplit) {
+        PaneView* inactive = getInactivePane();
+        if (!inactive) {
+            return;
+        }
+
+        GFile* targetDir = inactive->getCurrentDirectory();
+        if (!targetDir) {
+            return;
+        }
+
+        if (isMove) {
+            m_fileOps->moveAsync(
+                selectedFiles,
+                targetDir,
+                false,
+                [this, weakAlive, active, inactive](bool success, const std::string& msg) {
+                    auto alive = weakAlive.lock();
+                    if (!alive || !*alive) return;
+
+                    // Unconditionally reload both active and inactive panes on both success and failure
+                    active->reload();
+                    inactive->reload();
+
+                    if (success) {
+                        if (onShowToast) onShowToast("Move completed successfully");
+                    } else {
+                        if (onShowToast) onShowToast("Move failed: " + msg);
+                    }
+                }
+            );
+        } else {
+            m_fileOps->copyAsync(
+                selectedFiles,
+                targetDir,
+                false,
+                [this, weakAlive, active, inactive](bool success, const std::string& msg) {
+                    auto alive = weakAlive.lock();
+                    if (!alive || !*alive) return;
+
+                    // Unconditionally reload both active and inactive panes on both success and failure
+                    active->reload();
+                    inactive->reload();
+
+                    if (success) {
+                        if (onShowToast) onShowToast("Copy completed successfully");
+                    } else {
+                        if (onShowToast) onShowToast("Copy failed: " + msg);
+                    }
+                }
+            );
+        }
+    } else {
+        // Single pane mode
+        if (isMove) {
+            if (onShowToast) {
+                onShowToast("Move requires dual-pane mode (F3 to enable)");
+            }
+        } else {
+            // Duplicate in place with non-colliding names
+            GFile* currentDir = active->getCurrentDirectory();
+            if (!currentDir) {
+                return;
+            }
+
+            m_fileOps->copyAsync(
+                selectedFiles,
+                currentDir,
+                false,
+                [this, weakAlive, active](bool success, const std::string& msg) {
+                    auto alive = weakAlive.lock();
+                    if (!alive || !*alive) return;
+
+                    // Unconditionally reload active pane on both success and failure
+                    active->reload();
+
+                    if (success) {
+                        if (onShowToast) onShowToast("Duplicated successfully");
+                    } else {
+                        if (onShowToast) onShowToast("Duplicate failed: " + msg);
+                    }
+                }
+            );
+        }
+    }
 }
 
 void SplitView::setupUI() {

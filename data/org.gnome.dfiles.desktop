@@ -1,0 +1,13 @@
+[Desktop Entry]
+Name=dfiles
+GenericName=File Manager
+Comment=Modern dual-pane Linux file manager
+Exec=dfiles %U
+Icon=system-file-manager
+Terminal=false
+Type=Application
+Categories=System;FileTools;FileManager;GTK;
+MimeType=inode/directory;
+Keywords=files;folders;browser;manager;dual-pane;
+StartupNotify=true
+DBusActivatable=false

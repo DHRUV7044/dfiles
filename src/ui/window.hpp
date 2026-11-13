@@ -2,12 +2,14 @@
 
 #include <adwaita.h>
 #include <gio/gio.h>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
 
 #include "inspector/inspector_sidebar.hpp"
+#include "operations/file_ops.hpp"
 #include "terminal/terminal_drawer.hpp"
 #include "ui/headerbar.hpp"
 #include "ui/sidebar.hpp"
@@ -42,7 +44,15 @@ public:
     [[nodiscard]] views::SplitView* getSplitView() const noexcept;
     [[nodiscard]] terminal::TerminalDrawer* getTerminalDrawer() const noexcept;
     [[nodiscard]] inspector::InspectorSidebar* getInspectorSidebar() const noexcept;
+    [[nodiscard]] std::shared_ptr<operations::FileOperations> getFileOperations() const noexcept { return m_fileOps; }
     [[nodiscard]] GtkWidget* getContentArea() const;
+
+    void promptTextInput(
+        const std::string& heading,
+        const std::string& defaultText,
+        const std::string& confirmBtnText,
+        std::function<void(const std::string& text)> onConfirm
+    );
 
 private:
     void setupUI(AdwApplication* app);
@@ -63,6 +73,7 @@ private:
     std::unique_ptr<views::SplitView> m_splitView;
     std::unique_ptr<terminal::TerminalDrawer> m_terminalDrawer;
     std::unique_ptr<inspector::InspectorSidebar> m_inspectorSidebar;
+    std::shared_ptr<operations::FileOperations> m_fileOps;
 
     bool m_syncingFromTerminal{false};
 
@@ -70,6 +81,7 @@ private:
     std::mutex m_toastMutex;
     std::vector<guint> m_pendingToastSources;
     bool m_isDestroyed{false};
+    std::shared_ptr<bool> m_aliveToken;
 
     GtkEventController* m_keyController{nullptr};
     gulong m_keyPressedId{0};

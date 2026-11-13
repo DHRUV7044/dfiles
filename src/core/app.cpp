@@ -227,6 +227,40 @@ void DFilesApp::setupAccelerators() {
 
     const char* const focusFilterAccels[] = {"<Control>i", nullptr};
     gtk_application_set_accels_for_action(gtkApp, "win.focus-filter", focusFilterAccels);
+
+    // Milestone 4 file operation accelerators
+    const char* const quickCopyAccels[] = {"F5", nullptr};
+    gtk_application_set_accels_for_action(gtkApp, "win.quick-copy", quickCopyAccels);
+
+    const char* const quickMoveAccels[] = {"F6", nullptr};
+    gtk_application_set_accels_for_action(gtkApp, "win.quick-move", quickMoveAccels);
+
+    const char* const newFolderAccels[] = {"<Control><Shift>n", nullptr};
+    gtk_application_set_accels_for_action(gtkApp, "win.new-folder", newFolderAccels);
+
+    const char* const renameAccels[] = {"F2", nullptr};
+    gtk_application_set_accels_for_action(gtkApp, "win.rename", renameAccels);
+
+    const char* const trashAccels[] = {"Delete", nullptr};
+    gtk_application_set_accels_for_action(gtkApp, "win.trash", trashAccels);
+
+    const char* const deletePermanentAccels[] = {"<Shift>Delete", nullptr};
+    gtk_application_set_accels_for_action(gtkApp, "win.delete-permanent", deletePermanentAccels);
+
+    const char* const cutAccels[] = {"<Control>x", nullptr};
+    gtk_application_set_accels_for_action(gtkApp, "win.cut", cutAccels);
+
+    const char* const copyAccels[] = {"<Control>c", nullptr};
+    gtk_application_set_accels_for_action(gtkApp, "win.copy", copyAccels);
+
+    const char* const pasteAccels[] = {"<Control>v", nullptr};
+    gtk_application_set_accels_for_action(gtkApp, "win.paste", pasteAccels);
+
+    const char* const selectAllAccels[] = {"<Control>a", nullptr};
+    gtk_application_set_accels_for_action(gtkApp, "win.select-all", selectAllAccels);
+
+    const char* const contextMenuAccels[] = {"<Shift>F10", "Menu", nullptr};
+    gtk_application_set_accels_for_action(gtkApp, "win.context-menu", contextMenuAccels);
 }
 
 void DFilesApp::onActionQuit() {

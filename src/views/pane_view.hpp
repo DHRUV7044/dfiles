@@ -49,6 +49,12 @@ public:
 
     // Selection
     [[nodiscard]] std::vector<model::FileItem> getSelectedItems() const;
+    /// Return the list of selected GFiles (transfer full - caller must unref each GFile*).
+    [[nodiscard]] std::vector<GFile*> getSelectedFiles() const;
+
+    // Context Menu
+    void showContextMenu();
+    void showItemContextMenu();
 
     // Signals
     std::function<void(GFile* newDir)> onDirectoryChanged;

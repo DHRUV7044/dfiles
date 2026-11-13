@@ -39,6 +39,7 @@ core_sources = [
   'src/terminal/terminal_drawer.cpp',
   'src/inspector/checksum_helper.cpp',
   'src/inspector/inspector_sidebar.cpp',
+  'src/operations/file_ops.cpp',
   'src/ui/headerbar.cpp',
   'src/ui/sidebar.cpp',
   'src/ui/window.cpp',
@@ -54,6 +55,15 @@ executable('dfiles',
   dependencies: dfiles_deps,
   install: true,
 )
+
+install_data('data/org.gnome.dfiles.desktop',
+  install_dir: get_option('datadir') / 'applications'
+)
+
+install_data('data/org.gnome.dfiles.metainfo.xml',
+  install_dir: get_option('datadir') / 'metainfo'
+)
+
 
 # Phase 1 Functional Test Suite
 test_functional_sources = [
@@ -83,6 +93,22 @@ test_adversarial_bin = executable('test_adversarial',
 )
 
 test('adversarial', test_adversarial_bin,
+  is_parallel: false,
+  env: ['G_DEBUG=fatal-criticals']
+)
+
+# Phase 4 File Operations Test Suite
+test_file_ops_sources = [
+  'tests/test_file_ops.cpp',
+] + core_sources
+
+test_file_ops_bin = executable('test_file_ops',
+  test_file_ops_sources,
+  include_directories: inc,
+  dependencies: dfiles_deps,
+)
+
+test('file_ops', test_file_ops_bin,
   is_parallel: false,
   env: ['G_DEBUG=fatal-criticals']
 )

@@ -1,10 +1,12 @@
 #pragma once
 
+#include "operations/file_ops.hpp"
 #include "views/pane_view.hpp"
 
 #include <gtk/gtk.h>
 #include <functional>
 #include <memory>
+#include <string>
 
 namespace dfiles::views {
 
@@ -37,10 +39,18 @@ public:
     void setActivePane(PaneView* pane);
     void cycleFocus();
 
-    // Cross-pane transfer placeholder (for Phase 5)
+    // Cross-pane transfer (F5 Quick Copy / F6 Quick Move)
     void transferSelection(bool isMove);
 
+    void setFileOperations(std::shared_ptr<operations::FileOperations> fileOps) noexcept {
+        m_fileOps = std::move(fileOps);
+    }
+    [[nodiscard]] std::shared_ptr<operations::FileOperations> getFileOperations() const noexcept {
+        return m_fileOps;
+    }
+
     std::function<void(PaneView* activePane)> onActivePaneChanged;
+    std::function<void(const std::string& message)> onShowToast;
 
 private:
     void setupUI();
@@ -50,6 +60,9 @@ private:
     std::unique_ptr<PaneView> m_rightPane;
     PaneView* m_activePane{nullptr};
     bool m_isSplit{false};
+
+    std::shared_ptr<operations::FileOperations> m_fileOps;
+    std::shared_ptr<bool> m_aliveToken;
 };
 
 } // namespace dfiles::views

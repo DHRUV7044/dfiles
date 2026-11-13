@@ -10,6 +10,32 @@ FileView::~FileView() {
     onItemActivated = nullptr;
     onSelectionChanged = nullptr;
 
+    if (m_rightClickGesture) {
+        if (m_rightClickPressedId > 0 && g_signal_handler_is_connected(m_rightClickGesture, m_rightClickPressedId)) {
+            g_signal_handler_disconnect(m_rightClickGesture, m_rightClickPressedId);
+        }
+        m_rightClickPressedId = 0;
+        g_object_remove_weak_pointer(G_OBJECT(m_rightClickGesture), reinterpret_cast<gpointer*>(&m_rightClickGesture));
+        if (m_scrolledWindow) {
+            gtk_widget_remove_controller(m_scrolledWindow, GTK_EVENT_CONTROLLER(m_rightClickGesture));
+        }
+        m_rightClickGesture = nullptr;
+    }
+    if (m_itemPopover) {
+        g_object_remove_weak_pointer(G_OBJECT(m_itemPopover), reinterpret_cast<gpointer*>(&m_itemPopover));
+        if (gtk_widget_get_parent(m_itemPopover)) {
+            gtk_widget_unparent(m_itemPopover);
+        }
+        m_itemPopover = nullptr;
+    }
+    if (m_bgPopover) {
+        g_object_remove_weak_pointer(G_OBJECT(m_bgPopover), reinterpret_cast<gpointer*>(&m_bgPopover));
+        if (gtk_widget_get_parent(m_bgPopover)) {
+            gtk_widget_unparent(m_bgPopover);
+        }
+        m_bgPopover = nullptr;
+    }
+
     if (m_columnView) {
         if (m_colActivateId > 0) {
             if (g_signal_handler_is_connected(m_columnView, m_colActivateId)) {
@@ -47,6 +73,11 @@ FileView::~FileView() {
             m_selectionChangedHandlerId = 0;
         }
         g_clear_object(&m_selectionModel);
+    }
+
+    if (m_scrolledWindow) {
+        g_object_remove_weak_pointer(G_OBJECT(m_scrolledWindow), reinterpret_cast<gpointer*>(&m_scrolledWindow));
+        g_clear_object(&m_scrolledWindow);
     }
 }
 
@@ -149,6 +180,9 @@ void FileView::unselectAll() {
 
 void FileView::setupUI() {
     m_scrolledWindow = gtk_scrolled_window_new();
+    g_object_ref_sink(m_scrolledWindow);
+    g_object_add_weak_pointer(G_OBJECT(m_scrolledWindow), reinterpret_cast<gpointer*>(&m_scrolledWindow));
+
     gtk_scrolled_window_set_policy(
         GTK_SCROLLED_WINDOW(m_scrolledWindow),
         GTK_POLICY_AUTOMATIC,
@@ -159,6 +193,24 @@ void FileView::setupUI() {
 
     setupColumnView();
     setupGridView();
+    setupContextMenus();
+
+    // Keyboard controller for Shift+F10 / Menu context menu accelerator
+    GtkEventController* keyCtrl = gtk_event_controller_key_new();
+    g_signal_connect(keyCtrl, "key-pressed", G_CALLBACK(+[](GtkEventControllerKey*, guint keyval, guint, GdkModifierType state, gpointer userData) -> gboolean {
+        auto* self = static_cast<FileView*>(userData);
+        if (!self) return FALSE;
+
+        const bool isShiftF10 = (keyval == GDK_KEY_F10 && (state & GDK_SHIFT_MASK) != 0);
+        const bool isMenu = (keyval == GDK_KEY_Menu);
+
+        if (isShiftF10 || isMenu) {
+            self->showContextMenu();
+            return TRUE;
+        }
+        return FALSE;
+    }), this);
+    gtk_widget_add_controller(m_scrolledWindow, keyCtrl);
 
     // Default to List View
     gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(m_scrolledWindow), m_columnView);
@@ -202,6 +254,9 @@ void FileView::setupColumnView() {
             GtkWidget* box = gtk_list_item_get_child(item);
             if (!fileItem || !box) return;
 
+            guint pos = gtk_list_item_get_position(item);
+            g_object_set_data(G_OBJECT(box), "item_pos", GUINT_TO_POINTER(pos + 1));
+
             GtkWidget* image = gtk_widget_get_first_child(box);
             GtkWidget* label = gtk_widget_get_next_sibling(image);
 
@@ -217,6 +272,7 @@ void FileView::setupColumnView() {
         g_signal_connect(factory, "unbind", G_CALLBACK(+[](GtkSignalListItemFactory*, GtkListItem* item, gpointer) {
             GtkWidget* box = gtk_list_item_get_child(item);
             if (box) {
+                g_object_set_data(G_OBJECT(box), "item_pos", nullptr);
                 GtkWidget* image = gtk_widget_get_first_child(box);
                 GtkWidget* label = gtk_widget_get_next_sibling(image);
                 if (image) {
@@ -269,6 +325,8 @@ void FileView::setupColumnView() {
             DfilesFileItem* fileItem = DFILES_FILE_ITEM(gtk_list_item_get_item(item));
             GtkWidget* label = gtk_list_item_get_child(item);
             if (fileItem && label) {
+                guint pos = gtk_list_item_get_position(item);
+                g_object_set_data(G_OBJECT(label), "item_pos", GUINT_TO_POINTER(pos + 1));
                 gtk_label_set_text(GTK_LABEL(label), dfiles_file_item_get_formatted_size(fileItem));
             }
         }), nullptr);
@@ -276,6 +334,7 @@ void FileView::setupColumnView() {
         g_signal_connect(factory, "unbind", G_CALLBACK(+[](GtkSignalListItemFactory*, GtkListItem* item, gpointer) {
             GtkWidget* label = gtk_list_item_get_child(item);
             if (label) {
+                g_object_set_data(G_OBJECT(label), "item_pos", nullptr);
                 gtk_label_set_text(GTK_LABEL(label), "");
             }
         }), nullptr);
@@ -322,6 +381,8 @@ void FileView::setupColumnView() {
             DfilesFileItem* fileItem = DFILES_FILE_ITEM(gtk_list_item_get_item(item));
             GtkWidget* label = gtk_list_item_get_child(item);
             if (fileItem && label) {
+                guint pos = gtk_list_item_get_position(item);
+                g_object_set_data(G_OBJECT(label), "item_pos", GUINT_TO_POINTER(pos + 1));
                 gtk_label_set_text(GTK_LABEL(label), dfiles_file_item_get_formatted_time(fileItem));
             }
         }), nullptr);
@@ -329,6 +390,7 @@ void FileView::setupColumnView() {
         g_signal_connect(factory, "unbind", G_CALLBACK(+[](GtkSignalListItemFactory*, GtkListItem* item, gpointer) {
             GtkWidget* label = gtk_list_item_get_child(item);
             if (label) {
+                g_object_set_data(G_OBJECT(label), "item_pos", nullptr);
                 gtk_label_set_text(GTK_LABEL(label), "");
             }
         }), nullptr);
@@ -376,6 +438,8 @@ void FileView::setupColumnView() {
             DfilesFileItem* fileItem = DFILES_FILE_ITEM(gtk_list_item_get_item(item));
             GtkWidget* label = gtk_list_item_get_child(item);
             if (fileItem && label) {
+                guint pos = gtk_list_item_get_position(item);
+                g_object_set_data(G_OBJECT(label), "item_pos", GUINT_TO_POINTER(pos + 1));
                 gtk_label_set_text(GTK_LABEL(label), dfiles_file_item_get_permissions_string(fileItem));
             }
         }), nullptr);
@@ -383,6 +447,7 @@ void FileView::setupColumnView() {
         g_signal_connect(factory, "unbind", G_CALLBACK(+[](GtkSignalListItemFactory*, GtkListItem* item, gpointer) {
             GtkWidget* label = gtk_list_item_get_child(item);
             if (label) {
+                g_object_set_data(G_OBJECT(label), "item_pos", nullptr);
                 gtk_label_set_text(GTK_LABEL(label), "");
             }
         }), nullptr);
@@ -455,6 +520,9 @@ void FileView::setupGridView() {
         GtkWidget* card = gtk_list_item_get_child(item);
         if (!fileItem || !card) return;
 
+        guint pos = gtk_list_item_get_position(item);
+        g_object_set_data(G_OBJECT(card), "item_pos", GUINT_TO_POINTER(pos + 1));
+
         GtkWidget* image = gtk_widget_get_first_child(card);
         GtkWidget* label = gtk_widget_get_next_sibling(image);
 
@@ -470,6 +538,7 @@ void FileView::setupGridView() {
     g_signal_connect(factory, "unbind", G_CALLBACK(+[](GtkSignalListItemFactory*, GtkListItem* item, gpointer) {
         GtkWidget* card = gtk_list_item_get_child(item);
         if (card) {
+            g_object_set_data(G_OBJECT(card), "item_pos", nullptr);
             GtkWidget* image = gtk_widget_get_first_child(card);
             GtkWidget* label = gtk_widget_get_next_sibling(image);
             if (image) {
@@ -542,6 +611,205 @@ void FileView::onSorterChangedTrampoline(GtkSorter* sorter, int /*change*/, gpoi
         col = core::SortColumn::Type;
     }
     self->m_model->setSorting(col, order);
+}
+
+void FileView::setupContextMenus() {
+    // 1. Item Context Menu
+    GMenu* itemMenu = g_menu_new();
+
+    // Section 1: Navigation / Open
+    GMenu* s1 = g_menu_new();
+    g_menu_append(s1, "Open", "win.open-item");
+    g_menu_append(s1, "Open in Terminal", "win.open-terminal");
+    g_menu_append(s1, "Copy Path", "win.copy-path");
+    g_menu_append_section(itemMenu, nullptr, G_MENU_MODEL(s1));
+    g_object_unref(s1);
+
+    // Section 2: Clipboard
+    GMenu* s2 = g_menu_new();
+    g_menu_append(s2, "Cut", "win.cut");
+    g_menu_append(s2, "Copy", "win.copy");
+    g_menu_append(s2, "Paste", "win.paste");
+    g_menu_append_section(itemMenu, nullptr, G_MENU_MODEL(s2));
+    g_object_unref(s2);
+
+    // Section 3: File mutations
+    GMenu* s3 = g_menu_new();
+    g_menu_append(s3, "Rename…", "win.rename");
+    g_menu_append(s3, "Move to Trash", "win.trash");
+    g_menu_append(s3, "Delete Permanently", "win.delete-permanent");
+    g_menu_append_section(itemMenu, nullptr, G_MENU_MODEL(s3));
+    g_object_unref(s3);
+
+    // Section 4: Properties
+    GMenu* s4 = g_menu_new();
+    g_menu_append(s4, "Properties", "win.toggle-inspector");
+    g_menu_append_section(itemMenu, nullptr, G_MENU_MODEL(s4));
+    g_object_unref(s4);
+
+    m_itemPopover = gtk_popover_menu_new_from_model(G_MENU_MODEL(itemMenu));
+    gtk_widget_set_parent(m_itemPopover, m_scrolledWindow);
+    gtk_popover_set_has_arrow(GTK_POPOVER(m_itemPopover), FALSE);
+    g_object_unref(itemMenu);
+    g_object_add_weak_pointer(G_OBJECT(m_itemPopover), reinterpret_cast<gpointer*>(&m_itemPopover));
+
+    // 2. Background Context Menu
+    GMenu* bgMenu = g_menu_new();
+
+    GMenu* bgs1 = g_menu_new();
+    g_menu_append(bgs1, "New Folder…", "win.new-folder");
+    g_menu_append(bgs1, "Paste", "win.paste");
+    g_menu_append(bgs1, "Open in Terminal", "win.open-terminal");
+    g_menu_append_section(bgMenu, nullptr, G_MENU_MODEL(bgs1));
+    g_object_unref(bgs1);
+
+    GMenu* bgs2 = g_menu_new();
+    g_menu_append(bgs2, "Select All", "win.select-all");
+    g_menu_append_section(bgMenu, nullptr, G_MENU_MODEL(bgs2));
+    g_object_unref(bgs2);
+
+    m_bgPopover = gtk_popover_menu_new_from_model(G_MENU_MODEL(bgMenu));
+    gtk_widget_set_parent(m_bgPopover, m_scrolledWindow);
+    gtk_popover_set_has_arrow(GTK_POPOVER(m_bgPopover), FALSE);
+    g_object_unref(bgMenu);
+    g_object_add_weak_pointer(G_OBJECT(m_bgPopover), reinterpret_cast<gpointer*>(&m_bgPopover));
+
+    // 3. Right-Click Gesture
+    m_rightClickGesture = gtk_gesture_click_new();
+    gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(m_rightClickGesture), GDK_BUTTON_SECONDARY);
+    m_rightClickPressedId = g_signal_connect(
+        m_rightClickGesture,
+        "pressed",
+        G_CALLBACK(+[](GtkGestureClick*, int, double x, double y, gpointer userData) {
+            auto* self = static_cast<FileView*>(userData);
+            if (self) {
+                self->onRightClick(x, y);
+            }
+        }),
+        this
+    );
+    gtk_widget_add_controller(m_scrolledWindow, GTK_EVENT_CONTROLLER(m_rightClickGesture));
+    g_object_add_weak_pointer(G_OBJECT(m_rightClickGesture), reinterpret_cast<gpointer*>(&m_rightClickGesture));
+}
+
+void FileView::onRightClick(double x, double y) {
+    if (!m_scrolledWindow || !gtk_widget_get_root(m_scrolledWindow)) {
+        return;
+    }
+    GdkRectangle rect = {static_cast<int>(x), static_cast<int>(y), 1, 1};
+
+    GtkWidget* picked = gtk_widget_pick(m_scrolledWindow, x, y, GTK_PICK_DEFAULT);
+    GtkWidget* cur = picked;
+    bool inHeader = false;
+    guint itemPos = G_MAXUINT;
+
+    while (cur && cur != m_scrolledWindow) {
+        if (GTK_IS_SCROLLBAR(cur)) {
+            return;
+        }
+        const char* tn = G_OBJECT_TYPE_NAME(cur);
+        if (g_str_has_prefix(tn, "GtkColumnHeader") || g_str_has_prefix(tn, "GtkColumnViewTitle")) {
+            inHeader = true;
+            break;
+        }
+        if (itemPos == G_MAXUINT) {
+            gpointer data = g_object_get_data(G_OBJECT(cur), "item_pos");
+            if (data) {
+                itemPos = GPOINTER_TO_UINT(data) - 1;
+            }
+        }
+        cur = gtk_widget_get_parent(cur);
+    }
+
+    if (inHeader) {
+        return;
+    }
+
+    if (itemPos != G_MAXUINT) {
+        if (m_selectionModel) {
+            if (!gtk_selection_model_is_selected(GTK_SELECTION_MODEL(m_selectionModel), itemPos)) {
+                gtk_selection_model_select_item(GTK_SELECTION_MODEL(m_selectionModel), itemPos, TRUE);
+            }
+        }
+        if (m_bgPopover) {
+            gtk_popover_popdown(GTK_POPOVER(m_bgPopover));
+        }
+        if (m_itemPopover) {
+            gtk_popover_set_pointing_to(GTK_POPOVER(m_itemPopover), &rect);
+            gtk_popover_popup(GTK_POPOVER(m_itemPopover));
+        }
+    } else {
+        auto selected = getSelectedItems();
+        if (!selected.empty()) {
+            unselectAll();
+        }
+        if (m_itemPopover) {
+            gtk_popover_popdown(GTK_POPOVER(m_itemPopover));
+        }
+        if (m_bgPopover) {
+            gtk_popover_set_pointing_to(GTK_POPOVER(m_bgPopover), &rect);
+            gtk_popover_popup(GTK_POPOVER(m_bgPopover));
+        }
+    }
+}
+
+void FileView::showItemContextMenu() {
+    if (!m_itemPopover || !m_scrolledWindow || !gtk_widget_get_root(m_scrolledWindow)) {
+        return;
+    }
+    GtkNative* native = gtk_widget_get_native(m_scrolledWindow);
+    if (!native) {
+        return;
+    }
+    if (m_bgPopover) {
+        gtk_popover_popdown(GTK_POPOVER(m_bgPopover));
+    }
+    int width = gtk_widget_get_width(m_scrolledWindow);
+    int height = gtk_widget_get_height(m_scrolledWindow);
+    GdkRectangle rect = {
+        width > 0 ? width / 3 : 20,
+        height > 0 ? std::min(height / 3, 100) : 40,
+        1,
+        1
+    };
+    gtk_popover_set_pointing_to(GTK_POPOVER(m_itemPopover), &rect);
+    gtk_popover_popup(GTK_POPOVER(m_itemPopover));
+}
+
+void FileView::showContextMenu() {
+    if (!m_scrolledWindow || !gtk_widget_get_root(m_scrolledWindow)) {
+        return;
+    }
+    GtkNative* native = gtk_widget_get_native(m_scrolledWindow);
+    if (!native) {
+        return;
+    }
+
+    auto selected = getSelectedItems();
+    if (selected.empty()) {
+        if (m_selectionModel && g_list_model_get_n_items(G_LIST_MODEL(m_selectionModel)) > 0) {
+            gtk_selection_model_select_item(GTK_SELECTION_MODEL(m_selectionModel), 0, TRUE);
+            selected = getSelectedItems();
+        }
+    }
+
+    if (!selected.empty()) {
+        showItemContextMenu();
+    } else if (m_bgPopover) {
+        if (m_itemPopover) {
+            gtk_popover_popdown(GTK_POPOVER(m_itemPopover));
+        }
+        int width = gtk_widget_get_width(m_scrolledWindow);
+        int height = gtk_widget_get_height(m_scrolledWindow);
+        GdkRectangle rect = {
+            width > 0 ? width / 2 : 20,
+            height > 0 ? height / 2 : 40,
+            1,
+            1
+        };
+        gtk_popover_set_pointing_to(GTK_POPOVER(m_bgPopover), &rect);
+        gtk_popover_popup(GTK_POPOVER(m_bgPopover));
+    }
 }
 
 } // namespace dfiles::views

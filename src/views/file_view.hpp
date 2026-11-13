@@ -42,6 +42,12 @@ public:
     void selectAll();
     void unselectAll();
 
+    [[nodiscard]] GtkWidget* getItemPopover() const noexcept { return m_itemPopover; }
+    [[nodiscard]] GtkWidget* getBackgroundPopover() const noexcept { return m_bgPopover; }
+
+    void showContextMenu();
+    void showItemContextMenu();
+
     // Callbacks
     std::function<void(DfilesFileItem* item)> onItemActivated;
     std::function<void(const std::vector<model::FileItem>& items)> onSelectionChanged;
@@ -50,6 +56,8 @@ private:
     void setupUI();
     void setupColumnView();
     void setupGridView();
+    void setupContextMenus();
+    void onRightClick(double x, double y);
 
     // Signal trampolines
     static void onItemActivatedTrampoline(GtkWidget* widget, guint position, gpointer userData);
@@ -59,6 +67,11 @@ private:
     GtkWidget* m_scrolledWindow{nullptr};
     GtkWidget* m_columnView{nullptr};
     GtkWidget* m_gridView{nullptr};
+
+    GtkWidget* m_itemPopover{nullptr};
+    GtkWidget* m_bgPopover{nullptr};
+    GtkGesture* m_rightClickGesture{nullptr};
+    gulong m_rightClickPressedId{0};
 
     GtkColumnViewColumn* m_colName{nullptr};
     GtkColumnViewColumn* m_colSize{nullptr};

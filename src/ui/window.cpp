@@ -1,11 +1,43 @@
 #include "ui/window.hpp"
 #include <algorithm>
+#include <cctype>
 #include <cstring>
 #include <gdk/gdkkeysyms.h>
 
 namespace dfiles::ui {
 
-DFilesWindow::DFilesWindow(AdwApplication* app) {
+namespace {
+
+bool validateItemName(const std::string& name, std::string& errorToast) {
+    if (name.empty()) {
+        errorToast = "Invalid name: cannot be empty";
+        return false;
+    }
+    if (name.find('/') != std::string::npos) {
+        errorToast = "Invalid name: cannot contain forward slashes ('/')";
+        return false;
+    }
+    if (name.find("..") != std::string::npos) {
+        errorToast = "Invalid name: cannot contain traversal sequences ('..')";
+        return false;
+    }
+    if (name == ".") {
+        errorToast = "Invalid name: cannot be '.'";
+        return false;
+    }
+    if (std::isspace(static_cast<unsigned char>(name.front())) ||
+        std::isspace(static_cast<unsigned char>(name.back()))) {
+        errorToast = "Invalid name: cannot contain leading or trailing whitespace";
+        return false;
+    }
+    return true;
+}
+
+} // anonymous namespace
+
+DFilesWindow::DFilesWindow(AdwApplication* app)
+    : m_fileOps(std::make_shared<operations::FileOperations>()),
+      m_aliveToken(std::make_shared<bool>(true)) {
     setupUI(app);
     setupSignals();
     setupActions();
@@ -13,6 +45,14 @@ DFilesWindow::DFilesWindow(AdwApplication* app) {
 }
 
 DFilesWindow::~DFilesWindow() {
+    if (m_aliveToken) {
+        *m_aliveToken = false;
+    }
+    if (m_fileOps) {
+        m_fileOps->cancelCurrent();
+        m_fileOps.reset();
+    }
+
     // 1. Cancel all pending off-thread toast sources (REMED-1)
     {
         std::lock_guard<std::mutex> lock(m_toastMutex);
@@ -39,6 +79,7 @@ DFilesWindow::~DFilesWindow() {
         m_inspectorSidebar->onClosed = nullptr;
     }
     if (m_splitView) {
+        m_splitView->onShowToast = nullptr;
         m_splitView->onActivePaneChanged = nullptr;
         if (m_splitView->getLeftPane()) {
             m_splitView->getLeftPane()->onDirectoryChanged = nullptr;
@@ -199,6 +240,7 @@ void DFilesWindow::setupUI(AdwApplication* app) {
     m_headerBar = std::make_unique<DFilesHeaderBar>();
     m_sidebar = std::make_unique<PlacesSidebar>();
     m_splitView = std::make_unique<views::SplitView>();
+    m_splitView->setFileOperations(m_fileOps);
     m_terminalDrawer = std::make_unique<terminal::TerminalDrawer>();
     m_inspectorSidebar = std::make_unique<inspector::InspectorSidebar>();
 
@@ -479,6 +521,12 @@ void DFilesWindow::setupSignals() {
             }
         };
     }
+
+    if (m_splitView) {
+        m_splitView->onShowToast = [this](const std::string& msg) {
+            showToast(msg);
+        };
+    }
 }
 
 void DFilesWindow::setupActions() {
@@ -611,6 +659,398 @@ void DFilesWindow::setupActions() {
         }
     }), this);
     g_action_map_add_action(actionMap, G_ACTION(focusFilterAction));
+
+    // 6. Action: win.quick-copy (F5)
+    g_autoptr(GSimpleAction) quickCopyAction = g_simple_action_new("quick-copy", nullptr);
+    g_signal_connect(quickCopyAction, "activate", G_CALLBACK(+[](GSimpleAction*, GVariant*, gpointer data) {
+        auto* self = static_cast<DFilesWindow*>(data);
+        if (self && self->m_splitView) {
+            self->m_splitView->transferSelection(false);
+        }
+    }), this);
+    g_action_map_add_action(actionMap, G_ACTION(quickCopyAction));
+
+    // 7. Action: win.quick-move (F6)
+    g_autoptr(GSimpleAction) quickMoveAction = g_simple_action_new("quick-move", nullptr);
+    g_signal_connect(quickMoveAction, "activate", G_CALLBACK(+[](GSimpleAction*, GVariant*, gpointer data) {
+        auto* self = static_cast<DFilesWindow*>(data);
+        if (self && self->m_splitView) {
+            self->m_splitView->transferSelection(true);
+        }
+    }), this);
+    g_action_map_add_action(actionMap, G_ACTION(quickMoveAction));
+
+    // 8. Action: win.new-folder (<Control><Shift>n)
+    g_autoptr(GSimpleAction) newFolderAction = g_simple_action_new("new-folder", nullptr);
+    g_signal_connect(newFolderAction, "activate", G_CALLBACK(+[](GSimpleAction*, GVariant*, gpointer data) {
+        auto* self = static_cast<DFilesWindow*>(data);
+        if (!self || !self->m_splitView || !self->m_fileOps) return;
+
+        views::PaneView* active = self->m_splitView->getActivePane();
+        if (!active) return;
+        GFile* currentDir = active->getCurrentDirectory();
+        if (!currentDir) return;
+
+        std::weak_ptr<bool> weakAlive = self->m_aliveToken;
+        self->promptTextInput(
+            "New Folder",
+            "New Folder",
+            "Create",
+            [self, weakAlive, active, currentDir](const std::string& name) {
+                auto alive = weakAlive.lock();
+                if (!alive || !*alive) return;
+
+                std::string errorToast;
+                if (!validateItemName(name, errorToast)) {
+                    self->showToast(errorToast);
+                    return;
+                }
+
+                self->m_fileOps->createDirectoryAsync(
+                    currentDir,
+                    name,
+                    [self, weakAlive, active](bool success, const std::string& msg) {
+                        auto al = weakAlive.lock();
+                        if (!al || !*al) return;
+
+                        if (success) {
+                            active->reload();
+                            self->showToast("Folder created");
+                        } else {
+                            self->showToast("Error: " + msg);
+                        }
+                    }
+                );
+            }
+        );
+    }), this);
+    g_action_map_add_action(actionMap, G_ACTION(newFolderAction));
+
+    // 9. Action: win.rename (F2)
+    g_autoptr(GSimpleAction) renameAction = g_simple_action_new("rename", nullptr);
+    g_signal_connect(renameAction, "activate", G_CALLBACK(+[](GSimpleAction*, GVariant*, gpointer data) {
+        auto* self = static_cast<DFilesWindow*>(data);
+        if (!self || !self->m_splitView || !self->m_fileOps) return;
+
+        views::PaneView* active = self->m_splitView->getActivePane();
+        if (!active) return;
+
+        auto items = active->getSelectedItems();
+        if (items.empty()) {
+            self->showToast("No item selected to rename");
+            return;
+        }
+
+        auto targetItem = items[0];
+        GFile* targetFile = targetItem.getGFile();
+        if (!targetFile) return;
+
+        std::string currentName = targetItem.getName();
+        std::weak_ptr<bool> weakAlive = self->m_aliveToken;
+
+        self->promptTextInput(
+            "Rename",
+            currentName,
+            "Rename",
+            [self, weakAlive, active, targetFile](const std::string& newName) {
+                auto alive = weakAlive.lock();
+                if (!alive || !*alive) return;
+
+                std::string errorToast;
+                if (!validateItemName(newName, errorToast)) {
+                    self->showToast(errorToast);
+                    return;
+                }
+
+                self->m_fileOps->renameAsync(
+                    targetFile,
+                    newName,
+                    [self, weakAlive, active](bool success, const std::string& msg) {
+                        auto al = weakAlive.lock();
+                        if (!al || !*al) return;
+
+                        if (success) {
+                            active->reload();
+                            self->showToast("Renamed successfully");
+                        } else {
+                            self->showToast("Error: " + msg);
+                        }
+                    }
+                );
+            }
+        );
+    }), this);
+    g_action_map_add_action(actionMap, G_ACTION(renameAction));
+
+    // 10. Action: win.trash (Delete)
+    g_autoptr(GSimpleAction) trashAction = g_simple_action_new("trash", nullptr);
+    g_signal_connect(trashAction, "activate", G_CALLBACK(+[](GSimpleAction*, GVariant*, gpointer data) {
+        auto* self = static_cast<DFilesWindow*>(data);
+        if (!self || !self->m_splitView || !self->m_fileOps) return;
+
+        views::PaneView* active = self->m_splitView->getActivePane();
+        if (!active) return;
+
+        auto files = active->getSelectedFiles();
+        if (files.empty()) {
+            self->showToast("No files selected to trash");
+            return;
+        }
+
+        std::weak_ptr<bool> weakAlive = self->m_aliveToken;
+        self->m_fileOps->trashAsync(
+            files,
+            [self, weakAlive, active](bool success, const std::string& msg) {
+                auto alive = weakAlive.lock();
+                if (!alive || !*alive) return;
+
+                if (success) {
+                    active->reload();
+                    self->showToast("Moved to trash");
+                } else {
+                    self->showToast("Error: " + msg);
+                }
+            }
+        );
+        for (auto* f : files) {
+            if (f) g_object_unref(f);
+        }
+    }), this);
+    g_action_map_add_action(actionMap, G_ACTION(trashAction));
+
+    // 11. Action: win.delete-permanent (<Shift>Delete)
+    g_autoptr(GSimpleAction) deleteAction = g_simple_action_new("delete-permanent", nullptr);
+    g_signal_connect(deleteAction, "activate", G_CALLBACK(+[](GSimpleAction*, GVariant*, gpointer data) {
+        auto* self = static_cast<DFilesWindow*>(data);
+        if (!self || !self->m_splitView || !self->m_fileOps) return;
+
+        views::PaneView* active = self->m_splitView->getActivePane();
+        if (!active) return;
+
+        auto files = active->getSelectedFiles();
+        if (files.empty()) {
+            self->showToast("No files selected to delete");
+            return;
+        }
+
+        std::weak_ptr<bool> weakAlive = self->m_aliveToken;
+        self->m_fileOps->deleteAsync(
+            files,
+            [self, weakAlive, active](bool success, const std::string& msg) {
+                auto alive = weakAlive.lock();
+                if (!alive || !*alive) return;
+
+                if (success) {
+                    active->reload();
+                    self->showToast("Deleted permanently");
+                } else {
+                    self->showToast("Error: " + msg);
+                }
+            }
+        );
+        for (auto* f : files) {
+            if (f) g_object_unref(f);
+        }
+    }), this);
+    g_action_map_add_action(actionMap, G_ACTION(deleteAction));
+
+    // 12. Action: win.cut (<Control>x)
+    g_autoptr(GSimpleAction) cutAction = g_simple_action_new("cut", nullptr);
+    g_signal_connect(cutAction, "activate", G_CALLBACK(+[](GSimpleAction*, GVariant*, gpointer data) {
+        auto* self = static_cast<DFilesWindow*>(data);
+        if (!self || !self->m_splitView || !self->m_fileOps) return;
+
+        views::PaneView* active = self->m_splitView->getActivePane();
+        if (!active) return;
+
+        auto files = active->getSelectedFiles();
+        if (files.empty()) return;
+
+        self->m_fileOps->copyToClipboard(files, true);
+        self->showToast("Cut " + std::to_string(files.size()) + " item(s)");
+        for (auto* f : files) {
+            if (f) g_object_unref(f);
+        }
+    }), this);
+    g_action_map_add_action(actionMap, G_ACTION(cutAction));
+
+    // 13. Action: win.copy (<Control>c)
+    g_autoptr(GSimpleAction) copyAction = g_simple_action_new("copy", nullptr);
+    g_signal_connect(copyAction, "activate", G_CALLBACK(+[](GSimpleAction*, GVariant*, gpointer data) {
+        auto* self = static_cast<DFilesWindow*>(data);
+        if (!self || !self->m_splitView || !self->m_fileOps) return;
+
+        views::PaneView* active = self->m_splitView->getActivePane();
+        if (!active) return;
+
+        auto files = active->getSelectedFiles();
+        if (files.empty()) return;
+
+        self->m_fileOps->copyToClipboard(files, false);
+        self->showToast("Copied " + std::to_string(files.size()) + " item(s)");
+        for (auto* f : files) {
+            if (f) g_object_unref(f);
+        }
+    }), this);
+    g_action_map_add_action(actionMap, G_ACTION(copyAction));
+
+    // 14. Action: win.paste (<Control>v)
+    g_autoptr(GSimpleAction) pasteAction = g_simple_action_new("paste", nullptr);
+    g_signal_connect(pasteAction, "activate", G_CALLBACK(+[](GSimpleAction*, GVariant*, gpointer data) {
+        auto* self = static_cast<DFilesWindow*>(data);
+        if (!self || !self->m_splitView || !self->m_fileOps) return;
+
+        views::PaneView* active = self->m_splitView->getActivePane();
+        if (!active) return;
+
+        GFile* currentDir = active->getCurrentDirectory();
+        if (!currentDir) return;
+
+        std::weak_ptr<bool> weakAlive = self->m_aliveToken;
+        self->m_fileOps->pasteFromClipboard(
+            currentDir,
+            [self, weakAlive, active](bool success, const std::string& msg) {
+                auto alive = weakAlive.lock();
+                if (!alive || !*alive) return;
+
+                if (success) {
+                    active->reload();
+                    self->showToast("Pasted successfully");
+                } else {
+                    self->showToast("Paste failed: " + msg);
+                }
+            }
+        );
+    }), this);
+    g_action_map_add_action(actionMap, G_ACTION(pasteAction));
+
+    // 15. Action: win.select-all (<Control>a)
+    g_autoptr(GSimpleAction) selectAllAction = g_simple_action_new("select-all", nullptr);
+    g_signal_connect(selectAllAction, "activate", G_CALLBACK(+[](GSimpleAction*, GVariant*, gpointer data) {
+        auto* self = static_cast<DFilesWindow*>(data);
+        if (!self || !self->m_splitView) return;
+
+        views::PaneView* active = self->m_splitView->getActivePane();
+        if (active && active->getFileView()) {
+            active->getFileView()->selectAll();
+        }
+    }), this);
+    g_action_map_add_action(actionMap, G_ACTION(selectAllAction));
+
+    // 16. Action: win.copy-path
+    g_autoptr(GSimpleAction) copyPathAction = g_simple_action_new("copy-path", nullptr);
+    g_signal_connect(copyPathAction, "activate", G_CALLBACK(+[](GSimpleAction*, GVariant*, gpointer data) {
+        auto* self = static_cast<DFilesWindow*>(data);
+        if (!self || !self->m_splitView || !self->m_window) return;
+
+        views::PaneView* active = self->m_splitView->getActivePane();
+        if (!active) return;
+
+        auto files = active->getSelectedFiles();
+        std::string text;
+        if (files.empty()) {
+            GFile* cur = active->getCurrentDirectory();
+            if (cur) {
+                g_autofree char* path = g_file_get_path(cur);
+                if (path) text = path;
+            }
+        } else {
+            for (size_t i = 0; i < files.size(); ++i) {
+                g_autofree char* path = g_file_get_path(files[i]);
+                if (path) {
+                    if (!text.empty()) text += "\n";
+                    text += path;
+                }
+            }
+        }
+
+        if (!text.empty()) {
+            GdkClipboard* clip = gtk_widget_get_clipboard(self->m_window);
+            if (clip) {
+                gdk_clipboard_set_text(clip, text.c_str());
+                self->showToast("Path copied to clipboard");
+            }
+        }
+        for (auto* f : files) {
+            if (f) g_object_unref(f);
+        }
+    }), this);
+    g_action_map_add_action(actionMap, G_ACTION(copyPathAction));
+
+    // 17. Action: win.open-item
+    g_autoptr(GSimpleAction) openItemAction = g_simple_action_new("open-item", nullptr);
+    g_signal_connect(openItemAction, "activate", G_CALLBACK(+[](GSimpleAction*, GVariant*, gpointer data) {
+        auto* self = static_cast<DFilesWindow*>(data);
+        if (!self || !self->m_splitView) return;
+
+        views::PaneView* active = self->m_splitView->getActivePane();
+        if (!active) return;
+
+        auto items = active->getSelectedItems();
+        if (items.empty()) return;
+
+        if (items[0].isDirectory()) {
+            active->navigateTo(items[0].getGFile());
+        } else {
+            GFile* f = items[0].getGFile();
+            if (f) {
+                g_autofree char* uri = g_file_get_uri(f);
+                if (uri) {
+                    g_app_info_launch_default_for_uri_async(uri, nullptr, nullptr, nullptr, nullptr);
+                }
+            }
+        }
+    }), this);
+    g_action_map_add_action(actionMap, G_ACTION(openItemAction));
+
+    // 18. Action: win.open-terminal
+    g_autoptr(GSimpleAction) openTermAction = g_simple_action_new("open-terminal", nullptr);
+    g_signal_connect(openTermAction, "activate", G_CALLBACK(+[](GSimpleAction*, GVariant*, gpointer data) {
+        auto* self = static_cast<DFilesWindow*>(data);
+        if (!self || !self->m_splitView) return;
+
+        views::PaneView* active = self->m_splitView->getActivePane();
+        GFile* targetDir = nullptr;
+        if (active) {
+            auto items = active->getSelectedItems();
+            if (!items.empty() && items[0].isDirectory()) {
+                targetDir = items[0].getGFile();
+            } else {
+                targetDir = active->getCurrentDirectory();
+            }
+        }
+
+        if (self->m_terminalDrawer) {
+            self->m_terminalDrawer->setVisible(true);
+            if (targetDir) {
+                self->m_terminalDrawer->syncDirectory(targetDir);
+            }
+            self->m_terminalDrawer->grabFocus();
+        }
+        if (self->m_headerBar) {
+            self->m_headerBar->setTerminalActive(true);
+        }
+        if (self->m_window) {
+            if (auto* act = g_action_map_lookup_action(G_ACTION_MAP(self->m_window), "toggle-terminal")) {
+                g_simple_action_set_state(G_SIMPLE_ACTION(act), g_variant_new_boolean(TRUE));
+            }
+        }
+        self->showToast("Terminal opened");
+    }), this);
+    g_action_map_add_action(actionMap, G_ACTION(openTermAction));
+
+    // 19. Action: win.context-menu (Shift+F10 / Menu)
+    g_autoptr(GSimpleAction) contextMenuAction = g_simple_action_new("context-menu", nullptr);
+    g_signal_connect(contextMenuAction, "activate", G_CALLBACK(+[](GSimpleAction*, GVariant*, gpointer data) {
+        auto* self = static_cast<DFilesWindow*>(data);
+        if (!self || !self->m_splitView) return;
+
+        views::PaneView* active = self->m_splitView->getActivePane();
+        if (active) {
+            active->showContextMenu();
+        }
+    }), this);
+    g_action_map_add_action(actionMap, G_ACTION(contextMenuAction));
 }
 
 void DFilesWindow::setupShortcuts() {
@@ -620,7 +1060,7 @@ void DFilesWindow::setupShortcuts() {
 
     m_keyController = gtk_event_controller_key_new();
     m_keyPressedId = g_signal_connect(m_keyController, "key-pressed",
-        G_CALLBACK(+[](GtkEventControllerKey*, guint keyval, guint, GdkModifierType, gpointer data) -> gboolean {
+        G_CALLBACK(+[](GtkEventControllerKey*, guint keyval, guint, GdkModifierType state, gpointer data) -> gboolean {
             auto* self = static_cast<DFilesWindow*>(data);
             if (!self || !self->m_splitView) {
                 return GDK_EVENT_PROPAGATE;
@@ -632,10 +1072,104 @@ void DFilesWindow::setupShortcuts() {
                     return GDK_EVENT_STOP;
                 }
             }
+
+            const bool isShiftF10 = (keyval == GDK_KEY_F10 && (state & GDK_SHIFT_MASK) != 0);
+            const bool isMenu = (keyval == GDK_KEY_Menu);
+            if (isShiftF10 || isMenu) {
+                views::PaneView* active = self->m_splitView->getActivePane();
+                if (active) {
+                    active->showContextMenu();
+                    return GDK_EVENT_STOP;
+                }
+            }
+
             return GDK_EVENT_PROPAGATE;
         }), this);
 
     gtk_widget_add_controller(m_window, m_keyController);
+}
+
+void DFilesWindow::promptTextInput(
+    const std::string& heading,
+    const std::string& defaultText,
+    const std::string& confirmBtnText,
+    std::function<void(const std::string& text)> onConfirm
+) {
+    if (!m_window) return;
+
+    GtkWidget* entry = gtk_entry_new();
+    gtk_editable_set_text(GTK_EDITABLE(entry), defaultText.c_str());
+    gtk_entry_set_activates_default(GTK_ENTRY(entry), TRUE);
+
+    struct DialogContext {
+        GtkWidget* entry{nullptr};
+        std::function<void(const std::string&)> cb;
+    };
+    auto* ctx = new DialogContext{entry, std::move(onConfirm)};
+
+#if ADW_CHECK_VERSION(1, 5, 0)
+    AdwDialog* dialog = adw_alert_dialog_new(heading.c_str(), nullptr);
+    adw_alert_dialog_add_response(ADW_ALERT_DIALOG(dialog), "cancel", "Cancel");
+    adw_alert_dialog_add_response(ADW_ALERT_DIALOG(dialog), "confirm", confirmBtnText.c_str());
+    adw_alert_dialog_set_response_appearance(ADW_ALERT_DIALOG(dialog), "confirm", ADW_RESPONSE_SUGGESTED);
+    adw_alert_dialog_set_default_response(ADW_ALERT_DIALOG(dialog), "confirm");
+    adw_alert_dialog_set_close_response(ADW_ALERT_DIALOG(dialog), "cancel");
+    adw_alert_dialog_set_extra_child(ADW_ALERT_DIALOG(dialog), entry);
+
+    g_signal_connect_data(
+        dialog,
+        "response",
+        G_CALLBACK(+[](AdwAlertDialog*, const char* response, gpointer userData) {
+            auto* dctx = static_cast<DialogContext*>(userData);
+            if (dctx) {
+                if (g_strcmp0(response, "confirm") == 0 && dctx->cb) {
+                    const char* text = gtk_editable_get_text(GTK_EDITABLE(dctx->entry));
+                    dctx->cb(text ? text : "");
+                }
+            }
+        }),
+        ctx,
+        +[](gpointer userData, GClosure*) {
+            delete static_cast<DialogContext*>(userData);
+        },
+        static_cast<GConnectFlags>(0)
+    );
+
+    adw_dialog_present(dialog, m_window);
+#else
+    GtkWidget* dialog = adw_message_dialog_new(
+        GTK_WINDOW(m_window),
+        heading.c_str(),
+        nullptr
+    );
+    adw_message_dialog_add_response(ADW_MESSAGE_DIALOG(dialog), "cancel", "Cancel");
+    adw_message_dialog_add_response(ADW_MESSAGE_DIALOG(dialog), "confirm", confirmBtnText.c_str());
+    adw_message_dialog_set_response_appearance(ADW_MESSAGE_DIALOG(dialog), "confirm", ADW_RESPONSE_SUGGESTED);
+    adw_message_dialog_set_default_response(ADW_MESSAGE_DIALOG(dialog), "confirm");
+    adw_message_dialog_set_close_response(ADW_MESSAGE_DIALOG(dialog), "cancel");
+    adw_message_dialog_set_extra_child(ADW_MESSAGE_DIALOG(dialog), entry);
+
+    g_signal_connect_data(
+        dialog,
+        "response",
+        G_CALLBACK(+[](AdwMessageDialog*, const char* response, gpointer userData) {
+            auto* dctx = static_cast<DialogContext*>(userData);
+            if (dctx) {
+                if (g_strcmp0(response, "confirm") == 0 && dctx->cb) {
+                    const char* text = gtk_editable_get_text(GTK_EDITABLE(dctx->entry));
+                    dctx->cb(text ? text : "");
+                }
+            }
+        }),
+        ctx,
+        +[](gpointer userData, GClosure*) {
+            delete static_cast<DialogContext*>(userData);
+        },
+        static_cast<GConnectFlags>(0)
+    );
+
+    gtk_window_present(GTK_WINDOW(dialog));
+#endif
 }
 
 } // namespace dfiles::ui

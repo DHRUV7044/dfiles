@@ -1040,6 +1040,95 @@ int main(int /*argc*/, char* /*argv*/[]) {
     std::cout << std::endl;
 
     // -------------------------------------------------------------
+    // Test Section 12: Milestone 4 UI Wiring, Context Menus & Packaging
+    // -------------------------------------------------------------
+    std::cout << "--- Test Section 12: Milestone 4 UI Wiring, Actions & Packaging ---\n";
+    {
+        // 1. FileView Popovers
+        dfiles::views::FileView fview;
+        testAssert(fview.getItemPopover() != nullptr, "FileView getItemPopover() non-null");
+        testAssert(fview.getBackgroundPopover() != nullptr, "FileView getBackgroundPopover() non-null");
+
+        // 2. PaneView getSelectedFiles()
+        dfiles::views::PaneView pview;
+        std::vector<GFile*> files = pview.getSelectedFiles();
+        testAssert(files.empty(), "PaneView getSelectedFiles() returns empty vector on no selection");
+
+        // 3. Accelerators & Window GActions verification
+        dfiles::core::DFilesApp app("org.gnome.dfiles.test.phase4");
+        app.setTestMode(true);
+        g_application_register(G_APPLICATION(app.getNative()), nullptr, nullptr);
+        app.onStartup();
+
+        auto* gtkApp = GTK_APPLICATION(app.getNative());
+        testAssert(hasAccel(gtkApp, "win.quick-copy", "F5"), "Accelerator win.quick-copy -> F5");
+        testAssert(hasAccel(gtkApp, "win.quick-move", "F6"), "Accelerator win.quick-move -> F6");
+        testAssert(hasAccel(gtkApp, "win.new-folder", "<Shift><Control>n") || hasAccel(gtkApp, "win.new-folder", "<Control><Shift>n"), "Accelerator win.new-folder -> <Shift><Control>n");
+        testAssert(hasAccel(gtkApp, "win.rename", "F2"), "Accelerator win.rename -> F2");
+        testAssert(hasAccel(gtkApp, "win.trash", "Delete"), "Accelerator win.trash -> Delete");
+        testAssert(hasAccel(gtkApp, "win.delete-permanent", "<Shift>Delete"), "Accelerator win.delete-permanent -> <Shift>Delete");
+        testAssert(hasAccel(gtkApp, "win.cut", "<Control>x"), "Accelerator win.cut -> <Control>x");
+        testAssert(hasAccel(gtkApp, "win.copy", "<Control>c"), "Accelerator win.copy -> <Control>c");
+        testAssert(hasAccel(gtkApp, "win.paste", "<Control>v"), "Accelerator win.paste -> <Control>v");
+        testAssert(hasAccel(gtkApp, "win.select-all", "<Control>a"), "Accelerator win.select-all -> <Control>a");
+        testAssert(hasAccel(gtkApp, "win.context-menu", "<Shift>F10"), "Accelerator win.context-menu -> <Shift>F10");
+        testAssert(hasAccel(gtkApp, "win.context-menu", "Menu"), "Accelerator win.context-menu -> Menu");
+
+        // 4. Window GActions
+        auto win = std::make_unique<dfiles::ui::DFilesWindow>(app.getNative());
+        auto* actionMap = G_ACTION_MAP(win->getWindow());
+        const std::vector<const char*> expectedActions = {
+            "toggle-split", "toggle-terminal", "toggle-inspector", "focus-pathbar", "focus-filter",
+            "quick-copy", "quick-move", "new-folder", "rename", "trash", "delete-permanent",
+            "cut", "copy", "paste", "select-all", "copy-path", "open-item", "open-terminal",
+            "context-menu"
+        };
+        for (const char* actName : expectedActions) {
+            GAction* act = g_action_map_lookup_action(actionMap, actName);
+            testAssert(act != nullptr, std::string("GAction win.") + actName + " registered on window");
+        }
+
+        // Test context menu trigger methods
+        fview.showContextMenu();
+        pview.showContextMenu();
+
+        // 5. SplitView transferSelection in single pane
+        std::string lastToast;
+        win->getSplitView()->onShowToast = [&](const std::string& msg) {
+            lastToast = msg;
+        };
+        // In single pane mode without selection
+        win->getSplitView()->transferSelection(false);
+        testAssert(lastToast == "No files selected to transfer", "transferSelection with empty selection shows toast", lastToast);
+
+        // 6. Packaging Assets verification
+        std::string desktopPath = std::filesystem::exists("data/org.gnome.dfiles.desktop")
+            ? "data/org.gnome.dfiles.desktop" : "../data/org.gnome.dfiles.desktop";
+        testAssert(std::filesystem::exists(desktopPath), "Desktop file exists at " + desktopPath);
+        std::ifstream desktopIn(desktopPath);
+        std::string desktopContent((std::istreambuf_iterator<char>(desktopIn)), std::istreambuf_iterator<char>());
+        testAssert(desktopContent.find("Exec=dfiles %U") != std::string::npos, "Desktop file contains Exec=dfiles %U");
+        testAssert(desktopContent.find("Icon=system-file-manager") != std::string::npos, "Desktop file contains Icon=system-file-manager");
+        testAssert(desktopContent.find("MimeType=inode/directory;") != std::string::npos, "Desktop file contains MimeType=inode/directory;");
+        testAssert(desktopContent.find("DBusActivatable=false") != std::string::npos, "Desktop file contains DBusActivatable=false");
+
+        std::string metainfoPath = std::filesystem::exists("data/org.gnome.dfiles.metainfo.xml")
+            ? "data/org.gnome.dfiles.metainfo.xml" : "../data/org.gnome.dfiles.metainfo.xml";
+        testAssert(std::filesystem::exists(metainfoPath), "Metainfo file exists at " + metainfoPath);
+        std::ifstream metainfoIn(metainfoPath);
+        std::string metainfoContent((std::istreambuf_iterator<char>(metainfoIn)), std::istreambuf_iterator<char>());
+        testAssert(metainfoContent.find("<id>org.gnome.dfiles</id>") != std::string::npos, "Metainfo contains <id>org.gnome.dfiles</id>");
+
+        // 7. CLI Validator tool verification
+        int valRes = system(("desktop-file-validate " + desktopPath + " > /dev/null 2>&1").c_str());
+        testAssert(valRes == 0, "desktop-file-validate passes cleanly on " + desktopPath);
+
+        int appRes = system(("appstreamcli validate --no-net " + metainfoPath + " > /dev/null 2>&1").c_str());
+        testAssert(appRes == 0, "appstreamcli validate passes cleanly on " + metainfoPath);
+    }
+    std::cout << std::endl;
+
+    // -------------------------------------------------------------
     // Test Summary
     // -------------------------------------------------------------
     std::cout << "=========================================================\n";

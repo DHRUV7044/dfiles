@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>org.gnome.dfiles</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <name>dfiles</name>
+  <summary>Modern dual-pane Linux file manager</summary>
+  <description>
+    <p>
+      dfiles is a fast, keyboard-centric, dual-pane Linux file manager built
+      with GTK4, Libadwaita, and VTE.
+    </p>
+    <p>Features include:</p>
+    <ul>
+      <li>Dual-pane directory browsing with fast F3 toggle and focus cycling</li>
+      <li>Integrated terminal drawer (F4) with bidirectional directory synchronization</li>
+      <li>Live inspector sidebar (F11) with image previews and async checksum verification</li>
+      <li>Non-blocking asynchronous file operations with Freedesktop trash compliance</li>
+    </ul>
+  </description>
+  <developer id="org.gnome">
+    <name>dfiles Contributors</name>
+  </developer>
+  <launchable type="desktop-id">org.gnome.dfiles.desktop</launchable>
+  <url type="homepage">https://gitlab.gnome.org/World/dfiles</url>
+  <provides>
+    <binary>dfiles</binary>
+  </provides>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.1.0" date="2026-11-13">
+      <description>
+        <p>Initial release of dfiles featuring dual-pane browsing, embedded terminal drawer, and live inspector.</p>
+      </description>
+    </release>
+  </releases>
+</component>

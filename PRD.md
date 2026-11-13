@@ -141,7 +141,7 @@ dfiles/
 - [x] Task 3.5: Add background checksum generation (MD5, SHA-256) inside inspector.
 
 ### Milestone 4: Operations, Polish, and Quality Gates
-- [ ] Task 4.1: Implement async file operations (Copy, Cut, Paste, Trash, Permanent Delete, New Folder).
-- [ ] Task 4.2: Add cross-pane drag-and-drop and keyboard shortcuts (`F5` Copy, `F6` Move).
-- [ ] Task 4.3: Add comprehensive context menus (Open With, Open in Terminal, Copy Path, Properties).
-- [ ] Task 4.4: Verify complete build, run headless/unit tests, and run CodeRabbit review compliance.
+- [x] Task 4.1: Implement async file operations (Copy, Cut, Paste, Trash, Permanent Delete, New Folder).
+- [x] Task 4.2: Add cross-pane drag-and-drop and keyboard shortcuts (`F5` Copy, `F6` Move).
+- [x] Task 4.3: Add comprehensive context menus (Open With, Open in Terminal, Copy Path, Properties).
+- [x] Task 4.4: Verify complete build, run headless/unit tests, and run CodeRabbit review compliance.

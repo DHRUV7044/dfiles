@@ -27,7 +27,7 @@ This roadmap is designed for concurrent execution across autonomous agents and s
 ---
 
 ## Phase 1: Foundation & Window Shell
-* **Status**: Ready to Begin
+* **Status**: Completed (Certified in Milestone 1)
 * **Parallelizable**: Lead agent / Foundation setup
 * **Dependencies**: None
 * **Recommended Skills & Plugins**: `roo-code` (execution via `.clinerules`), `ralph-loop` (iteration tracking in `progress.txt`), `coderabbit` (memory & header review)
@@ -45,7 +45,7 @@ This roadmap is designed for concurrent execution across autonomous agents and s
 ---
 
 ## Phase 2: File Views & Dual-Pane (`F3`) Engine
-* **Status**: Blocked on Phase 1
+* **Status**: Completed (Certified in Milestone 2)
 * **Parallelizable**: Can be split between 2 subagents (Pane container vs File Item / View model)
 * **Dependencies**: Phase 1
 * **Recommended Skills & Plugins**: `gsd-workstreams` (parallel subagents), `roo-code` (discrete tasks), `coderabbit` (verify GListModel memory management)
@@ -71,7 +71,7 @@ This roadmap is designed for concurrent execution across autonomous agents and s
 ---
 
 ## Phase 3: Embedded Terminal (`F4`) with Bidirectional Sync
-* **Status**: Blocked on Phase 1 (Can run concurrently with Phase 2)
+* **Status**: Completed (Certified in Milestone 3)
 * **Parallelizable**: Independent Agent (Terminal specialist)
 * **Dependencies**: Phase 1 window layout
 * **Recommended Skills & Plugins**: `reverse-engineer-anything` (inspect native Dolphin VTE/Konsole OSC 7 behavior if needed), `roo-code`
@@ -92,7 +92,7 @@ This roadmap is designed for concurrent execution across autonomous agents and s
 ---
 
 ## Phase 4: Path Navigation (`Ctrl+L`), Filter Bar (`Ctrl+I`) & Live Inspector (`F11`)
-* **Status**: Blocked on Phase 2
+* **Status**: Completed (Certified in Milestone 3)
 * **Parallelizable**: Can be split between Navigation agent and Inspector agent
 * **Dependencies**: Phase 2 Pane & Model
 * **Recommended Skills & Plugins**: `gsd-ui-phase` / `gsd-ui-review` (Libadwaita visual contract and alignment audit), `roo-code`
@@ -116,7 +116,7 @@ This roadmap is designed for concurrent execution across autonomous agents and s
 ---
 
 ## Phase 5: Asynchronous File Operations & Cross-Pane Actions
-* **Status**: Blocked on Phase 2 & 4
+* **Status**: Completed (Certified in Milestone 4)
 * **Parallelizable**: Operations Agent
 * **Dependencies**: Phase 2 (Pane & Selection), Phase 1 (Toasts)
 * **Recommended Skills & Plugins**: `coderabbit` (verify async `GCancellable` thread safety & zero memory leaks), `ralph-loop`
@@ -138,7 +138,7 @@ This roadmap is designed for concurrent execution across autonomous agents and s
 ---
 
 ## Phase 6: Polish, Performance, Packaging & CodeRabbit Quality Gate
-* **Status**: Final Stage
+* **Status**: Completed (Certified in Milestone 4)
 * **Parallelizable**: Testing & Review Squad
 * **Dependencies**: All previous phases
 * **Recommended Skills & Plugins**: `adversarial-council` (deploy 2 Supervisors, 3 Workers, 2 Testers and 6-Judge High Court for full adversarial trial), `gsd-audit-fix`, `coderabbit`
